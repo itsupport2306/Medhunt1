@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install Medhunt Watcher</title>
+  <style>
+    body{max-width:760px;margin:48px auto;padding:0 24px;font:16px/1.55 "Segoe UI",sans-serif;color:#13263b}
+    h1{font-size:30px}li{margin:10px 0}code{padding:3px 6px;border-radius:5px;background:#edf3f5}
+    .path{display:block;margin:12px 0;padding:14px;border:1px solid #cbdadd;border-radius:9px;background:#f5f9fa;word-break:break-all}
+    .note{padding:14px;border-left:4px solid #087f77;background:#edf9f7}
+  </style>
+</head>
+<body>
+  <h1>Install Medhunt Watcher</h1>
+  <p>The watcher is separate from the normal Medhunt recruiter extension. The Medhunt backend must already be installed and running.</p>
+  <ol>
+    <li>Open <code>chrome://extensions</code> or <code>edge://extensions</code>.</li>
+    <li>Enable <strong>Developer mode</strong>.</li>
+    <li>Select <strong>Load unpacked</strong>.</li>
+    <li>Select this folder:<span class="path">{{WATCHER_PATH}}</span></li>
+    <li>Open Indeed Smart Sourcing and sign in.</li>
+    <li>On Indeed, enter the search string and location, select <strong>Sort by: Most recent</strong>, click <strong>Find</strong>, and wait for candidate cards.</li>
+    <li>Open <strong>Medhunt Watcher</strong>, choose the interval, then select <strong>Watch current search</strong>.</li>
+  </ol>
+  <p class="note">Keep the browser and authorized Indeed session running. The watcher reapplies <strong>Most recent</strong> before every scheduled comparison.</p>
+</body>
+</html>

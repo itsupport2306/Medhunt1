@@ -1,0 +1,18 @@
+MEDHUNT TEAM PACKAGE
+====================
+
+Application configuration is managed by your Medhunt administrator.
+
+This trusted-team build includes the lookup configuration required by its local
+backend. Treat Medhunt-Setup.exe as confidential: do not upload it publicly or
+send it outside the approved recruiting team.
+
+When watcher email alerts are enabled, this package also contains the SendGrid
+credential, verified sender, and administrator-configured recruiter recipient
+list. Those values remain in the local backend configuration and are not placed
+in the browser extension.
+
+The browser extension remains a separate Chrome/Edge component. Setup places
+it in a stable local folder and opens the one-time Load unpacked instructions.
+
+For assistance, contact your Medhunt administrator.

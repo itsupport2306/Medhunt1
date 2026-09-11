@@ -1,0 +1,83 @@
+"""Regression coverage for fast remote-database startup."""
+from pathlib import Path
+import sys
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from sourcing import store
+
+
+class _Cursor:
+    def __init__(self, row=None):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _Raw:
+    autocommit = True
+
+
+class _FakeConnection:
+    def __init__(self, ready):
+        self.ready = ready
+        self.queries = []
+        self.raw = _Raw()
+
+    def execute(self, query, args=()):
+        self.queries.append((query, args))
+        if query.startswith("SELECT "):
+            return _Cursor({"ready": self.ready})
+        return _Cursor()
+
+
+def test_prepare_postgres_skips_schema_replay_when_database_is_current(monkeypatch):
+    connection = _FakeConnection(True)
+    monkeypatch.setattr(store, "_POSTGRES_SCHEMA_READY", False)
+
+    store._prepare_postgres(connection)
+
+    assert store._POSTGRES_SCHEMA_READY is True
+    assert len(connection.queries) == 1
+    query = connection.queries[0][0]
+    assert "to_regclass('public.candidates')" in query
+    assert "column_name = 'contact_expires_at'" in query
+    assert "to_regclass('public.idx_nexus_deliveries_ready')" in query
+    assert "to_regclass('public.watcher_email_deliveries')" in query
+
+
+def test_prepare_postgres_runs_migrations_when_schema_is_incomplete(monkeypatch):
+    connection = _FakeConnection(False)
+    monkeypatch.setattr(store, "_POSTGRES_SCHEMA_READY", False)
+
+    store._prepare_postgres(connection)
+
+    assert store._POSTGRES_SCHEMA_READY is True
+    assert len(connection.queries) == 1 + len(store._POSTGRES_SCHEMA)
+    assert connection.queries[1][0] == store._POSTGRES_SCHEMA[0]
+
+
+def test_nexus_startup_migration_selects_only_legacy_identity_keys(monkeypatch):
+    class _RowsConnection:
+        def __init__(self):
+            self.query = ""
+
+        def execute(self, query, args=()):
+            self.query = query
+            return type("Rows", (), {"fetchall": lambda _self: []})()
+
+    connection = _RowsConnection()
+    rekeyed = []
+    monkeypatch.setattr(
+        store, "_rekey_nexus_identity",
+        lambda _connection, candidate_id: rekeyed.append(candidate_id),
+    )
+
+    store._migrate_all_nexus_identity_keys(connection)
+
+    assert rekeyed == []
+    assert "d.identity_key <>" in connection.query
+    assert "l.identity_key <>" in connection.query
+    assert "COALESCE(c.master_candidate_id,c.id)" in connection.query

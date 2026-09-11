@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Medhunt Watcher</title>
+  <link rel="stylesheet" href="watcher.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="mark" aria-hidden="true">M</div>
+    <div>
+      <strong>Medhunt Watcher</strong>
+      <span id="serviceStatus">Checking service…</span>
+    </div>
+    <span class="indicator" id="indicator" aria-hidden="true"></span>
+  </header>
+
+  <main>
+    <section class="card" id="configuration">
+      <h1>Indeed search monitor</h1>
+      <p class="muted">Prepare the search directly on Indeed, then let Medhunt monitor that results page.</p>
+
+      <ol class="setup-steps">
+        <li>Enter the search string and location on Indeed.</li>
+        <li>Select <strong>Sort by: Most recent</strong>.</li>
+        <li>Click <strong>Find</strong> and wait for candidate cards.</li>
+      </ol>
+
+      <label for="interval">Check every</label>
+      <select id="interval">
+        <option value="1">1 minute</option>
+        <option value="2" selected>2 minutes</option>
+        <option value="5">5 minutes</option>
+        <option value="10">10 minutes</option>
+        <option value="15">15 minutes</option>
+        <option value="30">30 minutes</option>
+      </select>
+
+      <div class="actions">
+        <button type="button" class="primary" id="start">Watch current search</button>
+        <button type="button" class="secondary" id="stop">Stop</button>
+      </div>
+    </section>
+
+    <section class="card status-card">
+      <div class="status-line">
+        <div>
+          <span class="eyebrow">STATUS</span>
+          <strong id="watchStatus">Not running</strong>
+        </div>
+        <button type="button" class="link-button" id="checkNow">Check now</button>
+      </div>
+      <div class="progress"><span id="progress"></span></div>
+      <p class="muted" id="detail">No search is being monitored.</p>
+      <dl class="metrics">
+        <div><dt id="visibleCount">0</dt><dd>visible</dd></div>
+        <div><dt id="changedCount">0</dt><dd>new/updated</dd></div>
+        <div><dt id="foundCount">0</dt><dd>contacts</dd></div>
+      </dl>
+      <div class="timestamps">
+        <span>Last check</span><strong id="lastRun">Never</strong>
+        <span>Next check</span><strong id="nextRun">Not scheduled</strong>
+      </div>
+    </section>
+
+    <section class="card activity-card">
+      <div class="status-line">
+        <h2>Recent activity</h2>
+        <button type="button" class="link-button danger" id="reset">Reset baseline</button>
+      </div>
+      <ol id="activity"><li class="empty">No activity yet.</li></ol>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="watcher.js"></script>
+</body>
+</html>

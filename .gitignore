@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+.idea/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+packaging/out/.MedhuntPrivateBuild-*/
+
+# Generated installers and build output are not suitable for GitHub storage.
+packaging/out/
+release.zip
+release/Medhunt-Setup.exe
+new_api.txt
+reports/
+runtime_logs/
+.runtime/
+src_pkg/.runtime/
+src_pkg/*.log

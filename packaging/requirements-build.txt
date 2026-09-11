@@ -1,0 +1,2 @@
+# Chrome Store JavaScript is minified (never obfuscated) for distribution.
+rjsmin>=1.2

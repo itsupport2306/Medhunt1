@@ -1,0 +1,1398 @@
+"""
+Medhunt Sourcing Assistant — FastAPI backend.
+
+Flow: add candidate names you're entitled to work with (manual / CSV / paste) →
+enrich via Enformion → rank vs a job → draft outreach (human-approved) → pipeline.
+
+Run:  uvicorn api:app --port 8091     then open http://localhost:8091
+"""
+from __future__ import annotations
+
+import base64
+import binascii
+import hashlib
+import hmac
+import logging
+import re
+import sys
+import time
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlsplit
+
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
+
+from sourcing import (
+    store, intake, ranking, outreach, config, storage,
+    resume_enrichment, contact_access,
+    person_name, phone_policy, quick_sourcer_client,
+    nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
+    profile_resume,
+)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Database schema preparation and provider clients are already lazy inside
+    # their respective stores. Do not contact any remote dependency before the
+    # localhost API becomes ready: a slow pooled database connection or
+    # provider probe must not make every browser-extension action unavailable.
+    if config.NEXUS_SYNC_REQUESTED and not config.NEXUS_SYNC_ENABLED:
+        logging.getLogger("medhunt.nexus").error(
+            "Candidate synchronization was requested but is disabled (%s).",
+            config.NEXUS_DISABLED_REASON,
+        )
+    nexus_delivery.start()
+    try:
+        yield
+    finally:
+        nexus_delivery.stop()
+
+
+APP_VERSION = "3.22.15"
+
+app = FastAPI(
+    title="Medhunt Sourcing Assistant",
+    version=APP_VERSION,
+    lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"^(chrome-extension|moz-extension)://[a-z0-9-]+$",
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_headers=[
+        "Content-Type", "X-Medhunt-Token", "X-HealthBoard-Extension-Token",
+    ],
+)
+
+
+_PUBLIC_LOCAL_PATHS = frozenset({
+    "/", "/app.js", "/styles.css", "/health", "/auth/config",
+    "/auth/request-code", "/auth/verify-code",
+})
+
+
+def _is_same_loopback_origin(request: Request, origin: str) -> bool:
+    """Return whether ``origin`` is the exact loopback origin serving the UI."""
+    try:
+        parsed = urlsplit(origin)
+        origin_host = (parsed.hostname or "").casefold().rstrip(".")
+        request_host = (request.url.hostname or "").casefold().rstrip(".")
+        loopback_hosts = {"127.0.0.1", "localhost", "::1"}
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.username
+            or parsed.password
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or origin_host not in loopback_hosts
+            or request_host not in loopback_hosts
+            or origin_host != request_host
+            or parsed.scheme != request.url.scheme
+        ):
+            return False
+        origin_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        request_port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        return origin_port == request_port
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def authenticate_local_api_requests(request: Request, call_next):
+    """Authenticate extension API calls with HealthBoard or the local token."""
+    origin = request.headers.get("origin", "").strip()
+    protected_cross_origin = bool(
+        origin and not _is_same_loopback_origin(request, origin)
+    )
+    request.state.user = None
+    request.state.healthboard_extension_token = ""
+    if (
+        healthboard_auth.enabled()
+        and request.method.upper() != "OPTIONS"
+        and request.url.path not in _PUBLIC_LOCAL_PATHS
+    ):
+        supplied = request.headers.get("x-healthboard-extension-token", "").strip()
+        if not supplied:
+            return JSONResponse({"detail": "Healthcareboard sign-in is required."}, status_code=401)
+        try:
+            identity = healthboard_auth.verify_extension_token(supplied)
+            request.state.user = {
+                "sub": str(identity.get("user_id") or ""),
+                "email": str(identity.get("email") or ""),
+                "role": str(identity.get("role") or ""),
+            }
+            request.state.healthboard_extension_token = supplied
+        except Exception:
+            return JSONResponse({"detail": "Invalid Healthcareboard extension session."}, status_code=401)
+    if (
+        config.LOCAL_API_TOKEN
+        and request.method.upper() != "OPTIONS"
+        and request.url.path not in _PUBLIC_LOCAL_PATHS
+        and protected_cross_origin
+    ):
+        supplied = request.headers.get("x-medhunt-token", "")
+        if not hmac.compare_digest(supplied, config.LOCAL_API_TOKEN):
+            return JSONResponse({"detail": "Unauthorized local API request."}, status_code=401)
+        request.state.user = request.state.user or {"sub": "local"}
+    return await call_next(request)
+
+
+def _request_user(request: Request | None) -> dict:
+    """Return the verified Healthcareboard identity, or a local-dev identity."""
+    user = getattr(getattr(request, "state", None), "user", None)
+    if user:
+        return user
+    if healthboard_auth.enabled():
+        raise HTTPException(401, "Authentication required.")
+    return {"sub": "local", "name": "Local Medhunt", "email": ""}
+
+_RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+_FRONTEND_DIR = _RESOURCE_ROOT / "frontend"
+_FRONTEND = _FRONTEND_DIR / "index.html"
+
+
+class JobIn(BaseModel):
+    title: str
+    location: str = ""
+    description: str = ""
+
+class IntakeIn(BaseModel):
+    text: str
+    job_id: int | None = None
+
+
+class ProfileImportIn(BaseModel):
+    name: str
+    location: str = ""
+    # Facebook exposes current city ("Lives in") and hometown ("From") as
+    # separate facts.  The database keeps the current city as the candidate's
+    # location; hometown is retained as source context for a controlled
+    # second-pass contact lookup only.
+    hometown: str = ""
+    headline: str = ""
+    # Adapters may send structured, source-visible context in addition to the
+    # raw notes.  The server serializes these into canonical evidence tags so
+    # every provider/verification path consumes the same bounded facts.
+    roles: list[str] = Field(default_factory=list, max_length=20)
+    employers: list[str] = Field(default_factory=list, max_length=20)
+    schools: list[str] = Field(default_factory=list, max_length=20)
+    alternate_names: list[str] = Field(default_factory=list, max_length=10)
+    notes: str = ""
+    source: str = "indeed"
+    source_url: str = ""
+    source_id: str = ""
+    job_id: int | None = None
+
+
+class ProfileBatchImportIn(BaseModel):
+    profiles: list[ProfileImportIn]
+    job_id: int | None = None
+    search_url: str = ""
+
+
+class ResumeDownloadIn(BaseModel):
+    path: str
+    filename: str = ""
+
+
+class ResumeCaptureIn(BaseModel):
+    content_base64: str
+    filename: str = "resume.pdf"
+
+
+class ProfessionalProfileResumeIn(BaseModel):
+    """Bounded public-directory facts used to generate an attributed PDF."""
+    kind: str = Field(pattern=r"^public_professional_profile$")
+    source_label: str = Field(default="U.S. News Doctor Finder", max_length=100)
+    source_url: str = Field(default="", max_length=2000)
+    headline: str = Field(default="", max_length=300)
+    summary: str = Field(default="", max_length=4000)
+    credentials: list[str] = Field(default_factory=list, max_length=12)
+    specialties: list[str] = Field(default_factory=list, max_length=20)
+    subspecialties: list[str] = Field(default_factory=list, max_length=20)
+    hospitals: list[str] = Field(default_factory=list, max_length=40)
+    education: list[str] = Field(default_factory=list, max_length=40)
+    certifications: list[str] = Field(default_factory=list, max_length=40)
+    licenses: list[str] = Field(default_factory=list, max_length=75)
+    languages: list[str] = Field(default_factory=list, max_length=20)
+    years_experience: str = Field(default="", max_length=60)
+    npi: str = Field(default="", max_length=30)
+    address: str = Field(default="", max_length=500)
+    location: str = Field(default="", max_length=300)
+
+
+class HealthBoardCodeRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+class HealthBoardCodeVerify(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+    code: str = Field(pattern=r"^\d{6}$")
+    challenge: str = Field(min_length=40, max_length=4096)
+
+
+class PdlBatchEnrichIn(BaseModel):
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+    run_id: str = Field(min_length=8, max_length=80)
+    # Fresh paid fallback is opt-in for every request. Cached Enformion results
+    # remain available without this consent because they consume no credit.
+    allow_enformion: bool = False
+    max_enformion_calls: int | None = Field(default=None, ge=0, le=100)
+
+
+class ContactLookupBatchIn(BaseModel):
+    """Small vendor-neutral contract used by the browser extension."""
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+    run_id: str = Field(min_length=8, max_length=80)
+    confirmed: bool = False
+
+
+class QuickSourcerFindIn(BaseModel):
+    """One person lookup requested from a captured or stored profile."""
+    name: str = Field(min_length=1, max_length=200)
+    location: str = Field(default="", max_length=200)
+    candidate_id: int | None = None
+    refresh: bool = False
+
+
+class IdentityReviewIn(BaseModel):
+    decision: str
+    canonical_name: str = ""
+    note: str = ""
+
+
+class OutreachIn(BaseModel):
+    candidate_id: int
+    job_id: int | None = None
+    channel: str | None = None
+
+class StageIn(BaseModel):
+    stage: str
+
+
+class PoolAssignIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+
+
+class CampaignCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+    job_id: int | None = None
+
+
+class OutreachBatchIn(BaseModel):
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
+    job_id: int | None = None
+    channel: str = "email"
+
+
+class DncIn(BaseModel):
+    value: str
+    reason: str = ""
+
+
+class WatcherResumeProfileIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    location: str = Field(default="", max_length=500)
+    headline: str = Field(default="", max_length=500)
+    source_url: str = Field(default="", max_length=2000)
+    source_id: str = Field(default="", max_length=500)
+    resume_marker: str = Field(default="", max_length=500)
+    change: str = Field(pattern=r"^(new|updated)$")
+
+
+class WatcherResumeNotificationIn(BaseModel):
+    event_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
+    watch_key: str = Field(default="", max_length=128)
+    query: str = Field(default="", max_length=2000)
+    location: str = Field(default="", max_length=300)
+    detected_at: str = Field(default="", max_length=64)
+    profiles: list[WatcherResumeProfileIn] = Field(min_length=1, max_length=100)
+
+
+def _public_lookup_result(result: dict) -> dict:
+    """Return the intentionally small, vendor-neutral lookup contract.
+
+    Provider responses, matching evidence, scores, policy decisions, costs, and
+    diagnostics stay inside the backend.  Contact values cross this boundary
+    only after the internal orchestration has explicitly marked them trusted.
+    """
+    source = dict(result or {})
+    verification_record = dict(source.get("verification") or {})
+    verification_evidence = dict(verification_record.get("evidence") or {})
+    contact = dict(
+        source.get("contact_verification")
+        or verification_evidence.get("contact_verification")
+        or {}
+    )
+    internal_status = str(
+        source.get("status") or source.get("enrich_status") or "error"
+    ).strip().lower()
+    trusted = bool(
+        internal_status == "success"
+        and (
+            source.get("contacts_trusted") is True
+            or contact.get("automatic_use_allowed") is True
+        )
+    )
+    emails = list(source.get("emails") or [])[:20] if trusted else []
+    # Trust booleans authorize the record, not arbitrary values inside it.
+    # Reapply per-number provenance at the final browser boundary so stale or
+    # inconsistent cached landlines fail closed instead of reaching a card.
+    phone_details = phone_policy.preferred_phone_details(source) if trusted else []
+    phones = [item["value"] for item in phone_details]
+    found = bool(trusted and (emails or phones))
+    failed = internal_status in {"error", "disabled", "budget_exhausted"}
+    internal_location_match = source.get("matched_location_context") or {}
+    location_match = None
+    if (
+        found
+        and isinstance(internal_location_match, dict)
+        and internal_location_match.get("type") == "hometown"
+    ):
+        matched_location = " ".join(
+            str(internal_location_match.get("value") or "").split()
+        )[:160]
+        if matched_location:
+            location_match = {"type": "hometown", "value": matched_location}
+    return {
+        "status": "found" if found else ("failed" if failed else "not_found"),
+        "emails": emails if found else [],
+        "phones": phones if found else [],
+        "phone_contacts": [
+            {"value": item["value"], "kind": item["kind"]}
+            for item in phone_details
+        ] if found else [],
+        # One approved usable contact channel is enough to retain the matched
+        # Indeed resume. Masked provider text is not exposed as an email, but a
+        # valid phone beside that text still makes the result eligible.
+        "resume_required": bool(found and (emails or phones)),
+        # This is deliberately vendor-neutral. It is emitted only when a
+        # trusted contact was accepted on the Facebook "From" retry.
+        "location_match": location_match,
+    }
+
+
+def _public_candidate(candidate: dict | None) -> dict:
+    projected = contact_access.project_candidate(candidate)
+    allowed = (
+        "id", "name", "location", "job_id", "stage", "fit_score",
+        "emails", "phones", "phone_contacts", "addresses", "enrich_status",
+        "notes", "created", "updated", "identity_status",
+    )
+    public = {key: projected.get(key) for key in allowed if key in projected}
+    public["records_available"] = bool(
+        str(projected.get("contact_source") or "") == "quick_sourcer"
+    )
+    return public
+
+
+def _public_resume(resume: dict | None) -> dict:
+    """Expose only fields the side panel needs to retrieve a stored resume."""
+    source = resume or {}
+    allowed = (
+        "id", "candidate_id", "filename", "mime_type", "size", "created",
+        "deduplicated", "contact_sheet_embedded", "contacts_saved",
+    )
+    return {key: source.get(key) for key in allowed if key in source}
+
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    if _FRONTEND.exists():
+        return FileResponse(str(_FRONTEND))
+    return HTMLResponse("<h1>Medhunt Sourcing Assistant API</h1>")
+
+
+@app.get("/styles.css", include_in_schema=False)
+def styles():
+    return FileResponse(str(_FRONTEND_DIR / "styles.css"), media_type="text/css")
+
+
+@app.get("/app.js", include_in_schema=False)
+def frontend_script():
+    return FileResponse(
+        str(_FRONTEND_DIR / "app.js"),
+        media_type="application/javascript",
+    )
+
+
+@app.get("/health")
+def health():
+    record_status = quick_sourcer_client.status()
+    return {
+        "status": "ok",
+        "service": "medhunt-api",
+        "version": APP_VERSION,
+        # Browser-facing capability flags remain vendor-neutral. Endpoints,
+        # credentials, and orchestration names stay inside the backend.
+        "records_lookup": {
+            "enabled": bool(record_status.get("enabled")),
+            "typical_seconds": list(record_status.get("typical_seconds") or []),
+        },
+        "lookup_behavior": (
+            "sequential" if _quick_sourcer_selected() else "bulk"
+        ),
+    }
+
+
+@app.get("/auth/config")
+def auth_config():
+    """Tell the extension whether Healthcareboard email-code login is enabled."""
+    return {
+        "enabled": healthboard_auth.enabled(),
+        "provider": "healthboard",
+    }
+
+
+def _request_client_ip(request: Request) -> str:
+    """Preserve the original browser IP for HealthBoard's auth rate limit."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    value = forwarded.split(",")[0].strip() if forwarded else ""
+    if not value and request.client:
+        value = request.client.host
+    return value[:64]
+
+
+@app.post("/auth/request-code")
+def request_healthboard_code(body: HealthBoardCodeRequest, request: Request):
+    if not healthboard_auth.enabled():
+        raise HTTPException(503, "Healthcareboard login is not configured.")
+    try:
+        return healthboard_auth.request_code(
+            body.email.strip().lower(), client_ip=_request_client_ip(request),
+        )
+    except Exception as exc:
+        logging.getLogger("medhunt.auth").warning(
+            "Healthcareboard code request failed (%s).", type(exc).__name__,
+        )
+        raise HTTPException(503, "The sign-in code service is temporarily unavailable.") from exc
+
+
+@app.post("/auth/verify-code")
+def verify_healthboard_code(body: HealthBoardCodeVerify, request: Request):
+    if not healthboard_auth.enabled():
+        raise HTTPException(503, "Healthcareboard login is not configured.")
+    try:
+        return healthboard_auth.verify_code(
+            body.email.strip().lower(), body.code, body.challenge,
+            client_ip=_request_client_ip(request),
+        )
+    except Exception as exc:
+        logging.getLogger("medhunt.auth").info(
+            "Healthcareboard code verification was rejected (%s).", type(exc).__name__,
+        )
+        raise HTTPException(401, "Invalid or expired sign-in code.") from exc
+
+
+@app.get("/auth/me")
+def auth_me(request: Request):
+    claims = _request_user(request)
+    subject = str(claims.get("sub") or "")
+    user = store.upsert_user(
+        subject,
+        email=str(claims.get("email") or ""),
+        name=str(claims.get("name") or ""),
+    )
+    return {
+        "user": {
+            "user_id": subject,
+            "email": claims.get("email", ""),
+            "name": claims.get("name", ""),
+            "role": claims.get("role", ""),
+        },
+    }
+
+
+@app.get("/analytics/me")
+def analytics_me(request: Request):
+    claims = _request_user(request)
+    subject = str(claims.get("sub") or "")
+    store.upsert_user(subject, email=str(claims.get("email") or ""), name=str(claims.get("name") or ""))
+    return store.user_enrichment_stats(subject)
+
+
+@app.get("/analytics/users")
+def analytics_users(request: Request):
+    """Local aggregate retained for administrators and diagnostics."""
+    claims = _request_user(request)
+    if healthboard_auth.enabled() and claims.get("role") != "admin":
+        raise HTTPException(403, "Healthcareboard administrator access is required.")
+    return store.all_user_enrichment_stats()
+
+
+@app.post("/watcher/resume-notifications")
+def watcher_resume_notifications(body: WatcherResumeNotificationIn):
+    return watcher_notifications.send_new_resume_alert(
+        event_id=body.event_id,
+        query=body.query,
+        location=body.location,
+        detected_at=body.detected_at,
+        profiles=[profile.model_dump() for profile in body.profiles],
+    )
+
+
+@app.get("/stats")
+def stats():
+    return store.stats()
+
+# ---- jobs ----
+@app.post("/jobs")
+def create_job(j: JobIn):
+    title = j.title.strip()
+    if not title:
+        raise HTTPException(400, "Job title is required.")
+    return {"id": store.create_job(title, j.location, j.description)}
+
+@app.get("/jobs")
+def jobs():
+    return store.list_jobs()
+
+# ---- candidates ----
+@app.post("/candidates/intake")
+def intake_candidates(body: IntakeIn):
+    rows = intake.parse(body.text)
+    if not rows:
+        raise HTTPException(400, "No candidate names found. Paste one per line or upload a CSV with a 'name' column.")
+    ids = store.add_candidates_bulk(rows, job_id=body.job_id)
+    return {"added": len(ids), "ids": ids, "parsed": rows}
+
+
+def _profile_row(body: ProfileImportIn, default_job_id: int | None = None):
+    captured_name = body.name.strip()
+    parsed_name = person_name.parse_person_name(captured_name)
+    name = parsed_name.name
+    if not name:
+        raise HTTPException(400, "Candidate name is required.")
+    job_id = body.job_id if body.job_id is not None else default_job_id
+    source = body.source.strip().lower()[:50] or "indeed"
+    location = body.location.strip()[:500]
+    notes = body.notes.strip()
+    hometown = " ".join(body.hometown.strip().split())[:500]
+
+    def source_values(values, *, limit: int, max_chars: int = 240):
+        output, seen = [], set()
+        for value in values or []:
+            cleaned = " ".join(str(value or "").split())[:max_chars]
+            key = cleaned.casefold()
+            if not cleaned or key in seen:
+                continue
+            seen.add(key)
+            output.append(cleaned)
+            if len(output) >= limit:
+                break
+        return output
+
+    def add_evidence_line(lines: list[str], label: str, value: str):
+        cleaned = " ".join(str(value or "").split())
+        if not cleaned:
+            return
+        line = f"{label}: {cleaned}"
+        if line.casefold() not in {item.casefold() for item in lines}:
+            lines.append(line)
+
+    evidence_lines: list[str] = []
+    headline = " ".join(body.headline.strip().split())[:500]
+    if headline:
+        add_evidence_line(evidence_lines, "Headline", headline)
+        headline_parts = re.split(r"\s+at\s+", headline, maxsplit=1, flags=re.IGNORECASE)
+        add_evidence_line(evidence_lines, "Role", headline_parts[0])
+        if len(headline_parts) == 2:
+            add_evidence_line(evidence_lines, "Employer", headline_parts[1])
+    for value in source_values(body.roles, limit=12):
+        add_evidence_line(evidence_lines, "Role", value)
+    for value in source_values(body.employers, limit=12):
+        add_evidence_line(evidence_lines, "Employer", value)
+    for value in source_values(body.schools, limit=10):
+        add_evidence_line(evidence_lines, "School", value)
+    for value in source_values(body.alternate_names, limit=8, max_chars=160):
+        alternate = person_name.normalize_person_name(value)
+        if len(person_name.identity_tokens(alternate)) >= 2:
+            add_evidence_line(evidence_lines, "Source alternate name", alternate)
+
+    if source == "facebook" and hometown:
+        hometown_line = f"Facebook hometown: {hometown}"
+        if hometown_line.casefold() not in notes.casefold():
+            notes = "\n".join(filter(None, (notes, hometown_line)))
+    identity_context = []
+    if captured_name and captured_name.casefold() != name.casefold():
+        identity_context.append(f"Source display name: {captured_name}")
+    identity_context.extend(
+        f"Source alternate name: {value}" for value in parsed_name.alternate_names
+    )
+    identity_context.extend(
+        f"Source professional descriptor: {value}" for value in parsed_name.descriptors
+    )
+    if identity_context:
+        evidence_lines.extend(identity_context)
+    existing_note_lines = {
+        " ".join(line.split()).casefold()
+        for line in notes.splitlines() if line.strip()
+    }
+    canonical_evidence = [
+        line for line in evidence_lines
+        if " ".join(line.split()).casefold() not in existing_note_lines
+    ]
+    if canonical_evidence:
+        notes = "\n".join([*canonical_evidence, notes]).strip()
+    return {
+        "name": name,
+        "location": location,
+        "hometown": hometown if source == "facebook" else "",
+        "job_id": job_id,
+        "notes": notes[:20000],
+        "source": source,
+        "source_url": body.source_url.strip()[:2000],
+        "source_id": body.source_id.strip()[:500],
+    }
+
+
+def _import_profile(body: ProfileImportIn):
+    row = _profile_row(body)
+    if row["job_id"] is not None and not store.get_job(row["job_id"]):
+        raise HTTPException(404, "job not found")
+    result = store.upsert_candidate_profiles([row])[0]
+    return {**result, "candidate": _public_candidate(result["candidate"])}
+
+
+@app.post("/candidates/import")
+def import_candidate(body: ProfileImportIn):
+    return _import_profile(body)
+
+
+@app.post("/candidates/import/batch")
+def import_candidate_batch(body: ProfileBatchImportIn):
+    if not body.profiles:
+        raise HTTPException(400, "At least one profile is required.")
+    if len(body.profiles) > 100:
+        raise HTTPException(400, "A maximum of 100 displayed profiles can be saved at once.")
+    if body.job_id is not None and not store.get_job(body.job_id):
+        raise HTTPException(404, "job not found")
+
+    rows = [_profile_row(profile, default_job_id=body.job_id) for profile in body.profiles]
+    upserted = store.upsert_candidate_profiles(rows, default_job_id=body.job_id)
+    imported = sum(int(result["imported"]) for result in upserted)
+    existing = len(upserted) - imported
+    results = [
+        {
+            "id": result["id"],
+            "imported": result["imported"],
+            "candidate": _public_candidate(result["candidate"]),
+        }
+        for result in upserted
+    ]
+    return {
+        "saved": len(results),
+        "imported": imported,
+        "existing": existing,
+        "results": results,
+        "search_url": body.search_url[:2000],
+        "database": store.backend_name(),
+    }
+
+
+@app.get("/candidates")
+def candidates(job_id: int | None = None, stage: str | None = None):
+    return [
+        _public_candidate(row)
+        for row in store.list_candidates(job_id=job_id, stage=stage)
+    ]
+
+@app.get("/candidates/{cid}")
+def candidate(cid: int):
+    c = store.get_candidate(cid)
+    if not c:
+        raise HTTPException(404, "not found")
+    projected = _public_candidate(c)
+    projected["outreach"] = store.list_outreach(cid)
+    projected["resumes"] = [
+        _public_resume(resume) for resume in store.list_resumes(cid)
+    ]
+    return projected
+
+@app.patch("/candidates/{cid}/stage")
+def set_stage(cid: int, s: StageIn):
+    if not store.get_candidate(cid):
+        raise HTTPException(404, "candidate not found")
+    try:
+        store.set_stage(cid, s.stage)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {"ok": True}
+
+
+# ---- talent pools / campaigns ----
+@app.get("/pools")
+def talent_pools():
+    return store.list_talent_pools()
+
+
+@app.post("/pools/assign")
+def assign_pool(body: PoolAssignIn):
+    try:
+        return store.add_candidates_to_pool(body.name, body.candidate_ids)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/campaigns")
+def campaigns():
+    return store.list_campaigns()
+
+
+@app.post("/campaigns")
+def create_campaign(body: CampaignCreateIn):
+    if body.job_id is not None and not store.get_job(body.job_id):
+        raise HTTPException(404, "job not found")
+    try:
+        return store.create_campaign(body.name, body.candidate_ids, body.job_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+def _store_resume_pdf(cid: int, filename: str, data: bytes):
+    candidate = store.get_candidate(cid)
+    if not candidate:
+        raise HTTPException(404, "candidate not found")
+    contactable = contact_access.project_candidate(candidate)
+    # Read the original PDF before the Medhunt contact page is prepended. Text
+    # PDFs stay local and fast; only sparse/image-only pages invoke local OCR.
+    # Extraction failure is fail-open for capture and fail-closed for identity:
+    # no low-confidence value can replace captured platform data.
+    extraction = resume_extraction.extract(data, candidate)
+    accepted_resume_fields = extraction.get("accepted") or {}
+    contact_sheet_candidate = dict(contactable)
+    if isinstance(accepted_resume_fields, dict):
+        if not str(contact_sheet_candidate.get("name") or "").strip():
+            contact_sheet_candidate["name"] = accepted_resume_fields.get("full_name") or ""
+        if not str(contact_sheet_candidate.get("location") or "").strip():
+            contact_sheet_candidate["location"] = accepted_resume_fields.get("location") or ""
+    nexus_contact_ready = bool(
+        config.NEXUS_SYNC_ENABLED
+        and contactable.get("contacts_trusted") is True
+        and contactable.get("phones")
+        and contactable.get("emails")
+    )
+    data, contact_sheet_embedded = resume_enrichment.add_contact_sheet(
+        data, contact_sheet_candidate,
+    )
+    if contact_sheet_embedded:
+        filename = resume_enrichment.enriched_filename(filename)
+    size = len(data)
+    queue_nexus = bool(
+        nexus_contact_ready and size <= config.NEXUS_MAX_RESUME_BYTES
+    )
+    nexus_skip_status = (
+        "skipped_resume_too_large"
+        if nexus_contact_ready and not queue_nexus
+        else "disabled"
+    )
+    checksum = hashlib.sha256(data).hexdigest()
+    existing = store.get_resume_by_checksum(cid, checksum)
+    if existing:
+        store.save_resume_extraction(existing["id"], cid, extraction)
+        nexus_delivery = (
+            store.enqueue_nexus_delivery(cid, existing["id"], checksum)
+            if queue_nexus else None
+        )
+        return {
+            **existing,
+            "contact_sheet_embedded": contact_sheet_embedded,
+            "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
+            "deduplicated": True,
+            "nexus_sync_status": (
+                nexus_delivery.get("status") if nexus_delivery else nexus_skip_status
+            ),
+        }
+    if storage.enabled():
+        try:
+            uploaded = storage.upload_resume(cid, filename, data)
+        except Exception as exc:
+            raise HTTPException(502, f"Resume upload to private object storage failed: {exc}")
+        resume = store.attach_resume(
+            cid,
+            filename,
+            b"",
+            size=size,
+            queue_nexus=queue_nexus,
+            extraction=extraction,
+            **uploaded,
+        )
+    else:
+        resume = store.attach_resume(
+            cid, filename, data, checksum_sha256=checksum,
+            queue_nexus=queue_nexus,
+            extraction=extraction,
+        )
+    result = {
+        **resume,
+        "contact_sheet_embedded": contact_sheet_embedded,
+        "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
+    }
+    if not queue_nexus:
+        result["nexus_sync_status"] = nexus_skip_status
+    return result
+
+
+@app.get("/session")
+def authenticated_session():
+    """Confirm that this extension copy shares the backend's local token."""
+    return {"status": "ok"}
+
+
+@app.post("/candidates/{cid}/resume/from-download")
+def attach_downloaded_resume(cid: int, body: ResumeDownloadIn):
+    if not store.get_candidate(cid):
+        raise HTTPException(404, "candidate not found")
+    try:
+        path = Path(body.path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise HTTPException(400, "Downloaded resume file was not found.")
+    try:
+        path.relative_to(config.RESUME_DOWNLOAD_DIR)
+    except ValueError:
+        raise HTTPException(400, "Resume must be inside the configured Downloads directory.")
+    if path.suffix.lower() != ".pdf":
+        raise HTTPException(400, "Only PDF resumes can be attached automatically.")
+    size = path.stat().st_size
+    if size <= 0 or size > config.RESUME_MAX_BYTES:
+        raise HTTPException(400, "Resume PDF is empty or exceeds the configured size limit.")
+    data = path.read_bytes()
+    if not data.startswith(b"%PDF"):
+        raise HTTPException(400, "The downloaded file is not a valid PDF.")
+    filename = Path(body.filename or path.name).name[:255] or "resume.pdf"
+    resume = _store_resume_pdf(cid, filename, data)
+    return {"attached": True, "resume": _public_resume(resume)}
+
+
+@app.post("/candidates/{cid}/resume/from-browser")
+def attach_captured_resume(cid: int, body: ResumeCaptureIn):
+    candidate = store.get_candidate(cid)
+    if not candidate:
+        raise HTTPException(404, "candidate not found")
+    encoded = body.content_base64.strip()
+    if encoded.lower().startswith("data:") and "," in encoded:
+        encoded = encoded.split(",", 1)[1]
+    if not encoded or len(encoded) > (config.RESUME_MAX_BYTES * 2):
+        raise HTTPException(400, "Captured resume is empty or exceeds the configured size limit.")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(400, "Captured resume data is not valid base64.")
+    pdf_start = data.find(b"%PDF-")
+    if pdf_start < 0:
+        raise HTTPException(400, "Captured resume is not a valid PDF.")
+    if pdf_start:
+        data = data[pdf_start:]
+    if not data or len(data) > config.RESUME_MAX_BYTES:
+        raise HTTPException(400, "Captured resume is empty or exceeds the configured size limit.")
+    filename = Path(body.filename or "resume.pdf").name[:255] or "resume.pdf"
+    if not filename.lower().endswith(".pdf"):
+        filename = f"{filename}.pdf"
+    resume = _store_resume_pdf(cid, filename, data)
+    refreshed = contact_access.project_candidate(store.get_candidate(cid))
+    return {
+        "attached": True,
+        "resume": _public_resume(resume),
+        "candidate": {
+            "id": cid,
+            "phones": refreshed.get("phones", []),
+            "emails": refreshed.get("emails", []),
+            "database_saved": bool(refreshed.get("phones") or refreshed.get("emails")),
+        },
+    }
+
+
+@app.get("/candidates/{cid}/resumes/{resume_id}")
+def get_resume(cid: int, resume_id: int):
+    resume = store.get_resume(cid, resume_id)
+    if not resume:
+        raise HTTPException(404, "resume not found")
+    safe_name = Path(resume["filename"]).name.replace('"', "")
+    data = bytes(resume.get("data") or b"")
+    if not data and resume.get("storage_provider") == "r2":
+        try:
+            data = storage.download_resume(resume.get("object_key") or "")
+        except Exception as exc:
+            raise HTTPException(502, f"Stored resume could not be retrieved: {exc}")
+    if not data:
+        raise HTTPException(404, "resume file is unavailable")
+    current = contact_access.project_candidate(store.get_candidate(cid))
+    try:
+        data, _ = resume_enrichment.refresh_contact_sheet(data, current)
+    except resume_enrichment.ContactSheetRefreshError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return Response(
+        content=data,
+        media_type=resume["mime_type"] or "application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe_name}"'},
+    )
+
+# ---- enrichment ----
+def _quick_sourcer_selected() -> bool:
+    """The public Medhunt product has one backend contact-lookup path."""
+    return True
+
+
+def _record_enrichment(request: Request | None, candidate_id: int, status: str,
+                       *, provider: str, run_id: str = "") -> None:
+    actor = _request_user(request)
+    subject = str(actor.get("sub") or "local")
+    normalized_status = str(status or "unknown")
+    store.record_enrichment_event(
+        subject, candidate_id, normalized_status,
+        provider=provider, run_id=run_id,
+    )
+    token = str(getattr(
+        getattr(request, "state", None), "healthboard_extension_token", "",
+    ) or "")
+    if not token or not healthboard_auth.enabled():
+        return
+    source = str((store.get_candidate(candidate_id) or {}).get("source") or provider)
+    identity = f"{subject}|{run_id or time.time_ns()}|{candidate_id}|{normalized_status}"
+    event_id = hashlib.sha256(identity.encode()).hexdigest()[:32]
+    try:
+        healthboard_auth.report_enrichment(
+            token,
+            event_id=event_id,
+            candidate_id=candidate_id,
+            status=normalized_status,
+            source=source,
+            run_id=run_id,
+        )
+    except Exception as exc:
+        # The paid/contact result is already complete. Analytics delivery must
+        # never discard it; the local event remains available for reconciliation.
+        logging.getLogger("medhunt.analytics").warning(
+            "Healthcareboard enrichment event delivery failed (%s).",
+            type(exc).__name__,
+        )
+
+
+@app.post("/candidates/{cid}/contact-lookup")
+def enrich_one(cid: int, request: Request = None):
+    _request_user(request)
+    if not store.get_candidate(cid):
+        raise HTTPException(404, "candidate not found")
+    result = quick_sourcer_client.lookup_candidate(cid)
+    _record_enrichment(
+        request, cid,
+        result.get("status") or result.get("enrich_status") or "unknown",
+        provider="quick_sourcer",
+    )
+    nexus_delivery.queue_latest_resume_if_ready(cid)
+    return result
+
+
+@app.post("/candidates/{cid}/identity/review")
+def review_candidate_identity(cid: int, body: IdentityReviewIn):
+    candidate = store.get_candidate(cid)
+    if not candidate:
+        raise HTTPException(404, "candidate not found")
+    decision = body.decision.strip().lower()
+    if decision not in ("approved", "rejected"):
+        raise HTTPException(400, "decision must be approved or rejected")
+    evidence = {
+        **(candidate.get("identity_evidence") or {}),
+        "review_note": body.note.strip()[:1000], "review_decision": decision,
+    }
+    if decision == "approved":
+        canonical = (
+            body.canonical_name.strip() or candidate.get("canonical_name")
+            or candidate["name"]
+        )
+        canonical = person_name.normalize_person_name(canonical)
+        if not canonical:
+            raise HTTPException(400, "A valid candidate name is required.")
+        store.update_candidate(
+            cid, canonical_name=canonical, identity_status="recruiter_confirmed",
+            identity_score=1.0, identity_provider="recruiter_review",
+            identity_evidence=evidence, identity_verified_at=time.time(),
+        )
+    else:
+        store.update_candidate(
+            cid, identity_status="rejected", identity_score=0,
+            identity_provider="recruiter_review", identity_evidence=evidence,
+            identity_verified_at=0,
+            emails=[], phones=[], addresses=[], enrich_status="no_match",
+        )
+    return _public_candidate(store.get_candidate(cid))
+
+
+def _internal_contact_lookup_batch(
+    body: PdlBatchEnrichIn, *, location_overrides: dict[int, str] | None = None,
+):
+    """Resolve a whole selection in one bulk PDL call and one database write.
+
+    The side panel uses this instead of one request per candidate; the run
+    credit limit, required usable-contact policy, and provider evidence rules
+    are applied identically to each result.
+    """
+    try:
+        batch = pdl_client.enrich_candidates(
+            body.candidate_ids, body.run_id,
+            location_overrides=location_overrides,
+        )
+    except Exception as exc:
+        # A PDL transport/processing failure is itself a fallback condition;
+        # keep the per-candidate errors and let the cost-aware waterfall try
+        # Enformion for identities with an exact captured location.
+        batch = {
+            "provider": "people_data_labs",
+            "credits_spent": 0,
+            "run_credits_spent": 0,
+            "results": {
+                str(cid): {
+                    "status": "error",
+                    "provider": "people_data_labs",
+                    "credits_spent": 0,
+                    "error": f"PDL backend processing failed ({type(exc).__name__}).",
+                }
+                for cid in body.candidate_ids
+            },
+        }
+    corroborated = multi_provider.verify_batch(
+        body.candidate_ids,
+        batch.get("results") or {},
+        body.run_id,
+        allow_enformion=body.allow_enformion,
+        max_enformion_calls=body.max_enformion_calls,
+        location_overrides=location_overrides,
+    )
+    return {
+        **batch,
+        "provider": "people_data_labs_with_enformion_fallback",
+        "contact_verification": corroborated["summary"],
+        "results": {str(cid): result for cid, result in corroborated["results"].items()},
+    }
+
+
+def _enformion_run_call_ceiling(candidate_count: int) -> int:
+    """Allow one Person Search and at most one owner-bound Tahoe follow-up."""
+    return min(100, max(0, int(candidate_count or 0)) * 2)
+
+
+def _facebook_hometown(candidate: dict | None) -> str:
+    """Read the separately captured Facebook ``From`` fact from source notes."""
+    if not candidate or str(candidate.get("source") or "").casefold() != "facebook":
+        return ""
+    structured = " ".join(str(candidate.get("hometown") or "").split())
+    if structured:
+        return structured[:500]
+    notes = str(candidate.get("notes") or "")
+    prefixes = (
+        "facebook hometown:",
+        # Compatibility with profiles captured before the structured field was
+        # added. New captures always use the reserved first prefix.
+        "visible detail: from ",
+        "hometown:",
+    )
+    for raw_line in notes.splitlines():
+        line = " ".join(raw_line.split())
+        folded = line.casefold()
+        for prefix in prefixes:
+            if folded.startswith(prefix):
+                value = line[len(prefix):].strip(" :-")
+                return value[:500]
+    return ""
+
+
+def _location_identity(value: str) -> str:
+    return "".join(character for character in str(value or "").casefold() if character.isalnum())
+
+
+def _hometown_retry_allowed(result: dict) -> bool:
+    """Retry only a definitive no-contact outcome, never ambiguity/failure."""
+    source = dict(result or {})
+    status = str(source.get("status") or "").strip().casefold()
+    if status not in {"no_match", "skipped"}:
+        return False
+    verification_record = dict(source.get("verification") or {})
+    verification_evidence = dict(verification_record.get("evidence") or {})
+    contact = dict(
+        source.get("contact_verification")
+        or verification_evidence.get("contact_verification")
+        or {}
+    )
+    contact_status = str(contact.get("status") or "").strip().casefold()
+    if contact_status in {
+        "fallback_budget_exhausted", "fallback_not_authorized",
+        "fallback_unavailable", "enformion_identity_review",
+    }:
+        return False
+    if str(contact.get("enformion_status") or "").strip().casefold() == "error":
+        return False
+    selection = dict(contact.get("enformion_selection") or {})
+    if selection.get("selection") == "ambiguous_exact_matches":
+        return False
+    if contact.get("enformion_conflicts"):
+        return False
+    reason_code = str(source.get("reason_code") or "").strip().casefold()
+    if source.get("error") and not reason_code:
+        return False
+    if reason_code == "local_validation_rejected":
+        # This is a discovery retry, not acceptance of the rejected record.
+        # A provider/current-city mismatch is exactly when Facebook's distinct
+        # source-captured hometown can find a different owner record. The
+        # second response still has to pass every normal name, location,
+        # ambiguity, contact and DNC gate before anything is displayed.
+        pass
+    elif reason_code and reason_code not in {
+        "pdl_required_contact_no_match",
+        # Compatibility with cached results created before email-bearing PDL
+        # identities became eligible for the normal contact policy.
+        "pdl_required_mobile_no_match",
+    }:
+        return False
+    return _public_lookup_result(source)["status"] == "not_found"
+
+
+def _annotate_hometown_match(candidate_id: int, result: dict, hometown: str) -> dict:
+    """Attach auditable internal context only after the retry is trusted."""
+    if _public_lookup_result(result).get("status") != "found":
+        return result
+    location_context = {"type": "hometown", "value": hometown[:500]}
+    annotated = {**result, "matched_location_context": location_context}
+    candidate = store.get_candidate(candidate_id)
+    if candidate:
+        verification_record = dict(
+            annotated.get("verification") or candidate.get("verification") or {}
+        )
+        evidence = dict(verification_record.get("evidence") or {})
+        evidence["matched_location_context"] = location_context
+        verification_record["evidence"] = evidence
+        store.update_candidate(candidate_id, verification=verification_record)
+        annotated["verification"] = verification_record
+    return annotated
+
+
+def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
+    """Look each selected candidate up through Quick Sourcer, one at a time.
+
+    The external API drives a real browser per person, so these cannot be
+    parallelised; the side panel therefore sends small chunks and shows
+    per-candidate progress. Every answer is returned exactly as the API
+    delivered it — a miss is a miss, not a policy hold.
+    """
+    results = {}
+    for candidate_id in dict.fromkeys(body.candidate_ids):
+        if not store.get_candidate(candidate_id):
+            results[str(candidate_id)] = {
+                "status": "failed", "emails": [], "phones": [],
+                "phone_contacts": [], "resume_required": False, "location_match": None,
+            }
+            continue
+        try:
+            results[str(candidate_id)] = quick_sourcer_client.lookup_candidate(candidate_id)
+        except Exception as exc:
+            # A malformed provider response or one database row must never turn
+            # the entire selection into an HTTP 500. The panel can retry this
+            # candidate independently while completed rows remain visible.
+            logging.getLogger("medhunt.lookup").warning(
+                "Candidate lookup failed for id %s (%s).",
+                candidate_id,
+                type(exc).__name__,
+            )
+            results[str(candidate_id)] = {
+                "status": "failed", "emails": [], "phones": [],
+                "phone_contacts": [], "resume_required": False,
+                "location_match": None,
+            }
+        try:
+            nexus_delivery.queue_latest_resume_if_ready(candidate_id)
+        except Exception as exc:
+            # Nexus delivery is asynchronous follow-up. It must not invalidate
+            # a contact result that was already found and stored successfully.
+            logging.getLogger("medhunt.nexus").warning(
+                "Nexus queueing was deferred for candidate %s (%s).",
+                candidate_id,
+                type(exc).__name__,
+            )
+    return {
+        "status": "ok",
+        "results": results,
+        "processed": len(results),
+        "matched": sum(
+            1 for result in results.values() if result.get("status") == "found"
+        ),
+    }
+
+
+@app.post("/contact-lookup/batch")
+def contact_lookup_batch(body: ContactLookupBatchIn, request: Request = None):
+    _request_user(request)
+    """Vendor-neutral browser endpoint with a deliberately minimal response."""
+    result = _quick_sourcer_lookup_batch(body)
+    for candidate_id, item in (result.get("results") or {}).items():
+        _record_enrichment(
+            request, int(candidate_id), item.get("status") or "unknown",
+            provider="quick_sourcer", run_id=body.run_id,
+        )
+    return result
+
+
+@app.post("/enrich/batch")
+def enrich_batch(job_id: int | None = None):
+    raise HTTPException(410, "Use the candidate contact lookup endpoint.")
+
+# ---- ranking ----
+@app.post("/jobs/{job_id}/rank")
+def rank(job_id: int):
+    r = ranking.rank_job(job_id)
+    if r.get("error"):
+        raise HTTPException(404, r["error"])
+    return r
+
+# ---- outreach ----
+@app.post("/outreach/draft")
+def draft(o: OutreachIn):
+    job = store.get_job(o.job_id) if o.job_id else None
+    if o.job_id and not job:
+        raise HTTPException(404, "job not found")
+    r = outreach.draft_for_candidate(o.candidate_id, job=job, channel=o.channel)
+    if r.get("error"):
+        raise HTTPException(400, r["error"])
+    return r
+
+
+@app.post("/outreach/draft/batch")
+def draft_batch(body: OutreachBatchIn):
+    channel = body.channel.strip().lower()
+    if channel != "email":
+        raise HTTPException(400, "Batch outreach currently supports email only.")
+    job = store.get_job(body.job_id) if body.job_id else None
+    if body.job_id and not job:
+        raise HTTPException(404, "job not found")
+
+    drafts, errors = [], []
+    for candidate_id in dict.fromkeys(body.candidate_ids):
+        result = outreach.draft_for_candidate(candidate_id, job=job, channel=channel)
+        if result.get("error"):
+            errors.append({"candidate_id": candidate_id, "error": result["error"]})
+        else:
+            candidate = store.get_candidate(candidate_id) or {}
+            drafts.append({**result, "candidate_name": candidate.get("name", "")})
+    return {
+        "drafts": drafts,
+        "errors": errors,
+        "created": len(drafts),
+        "failed": len(errors),
+    }
+
+
+@app.post("/outreach/{oid}/approve")
+def approve(oid: int):
+    r = outreach.approve_and_mark_sent(oid)
+    if r.get("error"):
+        raise HTTPException(404, r["error"])
+    return r
+
+# ---- Backend-owned public-record lookup ----
+@app.get("/records/status")
+def records_status():
+    status = quick_sourcer_client.status()
+    return {
+        "enabled": bool(status.get("enabled")),
+        "typical_seconds": list(status.get("typical_seconds") or []),
+    }
+
+
+@app.post("/candidates/{cid}/professional-profile-resume")
+def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeIn):
+    """Render and store an explicitly labeled public-profile résumé.
+
+    Storage and Nexus delivery intentionally pass through the same audited
+    resume path as captured PDFs. Public appointment phone numbers are not
+    accepted by this endpoint and therefore cannot become candidate contacts.
+    """
+    candidate = store.get_candidate(cid)
+    if not candidate:
+        raise HTTPException(404, "candidate not found")
+    if str(candidate.get("source") or "").strip().casefold() != "usnews":
+        raise HTTPException(400, "Professional profile resumes are available for U.S. News profiles only.")
+    try:
+        source = urlsplit(body.source_url)
+    except ValueError:
+        source = None
+    if (
+        not source
+        or source.scheme not in {"http", "https"}
+        or (source.hostname or "").casefold() != "health.usnews.com"
+        or not re.match(r"^/(?:doctors|nurse-practitioners)/", source.path, re.IGNORECASE)
+    ):
+        raise HTTPException(400, "A valid U.S. News provider profile URL is required.")
+    profile = body.model_dump()
+    if not any((profile["education"], profile["certifications"], profile["licenses"])):
+        raise HTTPException(400, "The public profile has not finished loading its credentials.")
+    try:
+        rendered = profile_resume.render(candidate, profile)
+    except Exception as exc:
+        logging.getLogger("medhunt.profile_resume").exception(
+            "Professional profile PDF rendering failed for candidate %s", cid,
+        )
+        raise HTTPException(500, "Professional profile PDF could not be generated.") from exc
+    resume = _store_resume_pdf(
+        cid,
+        profile_resume.filename(candidate, profile),
+        rendered,
+    )
+    return {
+        "attached": True,
+        "document_type": "public_professional_profile",
+        "resume": _public_resume(resume),
+    }
+
+
+@app.post("/records/find")
+def records_find(body: QuickSourcerFindIn):
+    name = person_name.normalize_person_name(body.name) or body.name.strip()
+    if not name:
+        raise HTTPException(400, "A candidate name is required.")
+    location = body.location.strip()
+    candidate_id = int(body.candidate_id or 0)
+    if candidate_id:
+        candidate = store.get_candidate(candidate_id)
+        if not candidate:
+            raise HTTPException(404, "candidate not found")
+        location = location or str(candidate.get("location") or "")
+    result = quick_sourcer_client.find(
+        name, location, candidate_id=candidate_id, refresh=body.refresh,
+    )
+    return {**result, "candidate_id": candidate_id or None, "searched": {"name": name, "location": location}}
+
+
+@app.get("/records/candidates/{external_id}")
+def records_candidate(external_id: int, refresh: bool = False):
+    result = quick_sourcer_client.fetch(external_id, refresh=refresh)
+    if result.get("status") == "not_found":
+        raise HTTPException(404, "No record exists with that id.")
+    return result
+
+
+# ---- do-not-contact ----
+@app.post("/dnc")
+def add_dnc(d: DncIn):
+    value = d.value.strip()
+    if not value:
+        raise HTTPException(400, "Email or phone is required.")
+    store.add_dnc(value, d.reason)
+    return {"ok": True}
+
+@app.get("/dnc")
+def dnc():
+    return store.list_dnc()
+
+@app.get("/compliance")
+def compliance():
+    return {"notice": config.COMPLIANCE_NOTICE,
+            "human_approval_required": config.REQUIRE_HUMAN_APPROVAL,
+            "default_channel": config.DEFAULT_CHANNEL}

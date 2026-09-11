@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Medhunt Watcher",
+  "description": "Continuously checks one authorized Indeed Smart Sourcing search for new and updated candidate resumes.",
+  "version": "1.2.0",
+  "permissions": [
+    "alarms",
+    "debugger",
+    "downloads",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://*.indeed.com/*"
+  ],
+  "background": {
+    "service_worker": "watcher-background.js"
+  },
+  "action": {
+    "default_title": "Open Medhunt Watcher"
+  },
+  "side_panel": {
+    "default_path": "watcher.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.indeed.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://*.indeed.com/*"],
+      "js": ["indeed-content.js", "watcher-content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
