@@ -227,6 +227,16 @@
       roles: textList(raw.roles),
       employers: textList(raw.employers),
       schools: textList(raw.schools),
+      // Preserve source-declared specialties independently from generic
+      // skills/roles. Healthcare and staffing adapters can expose either a
+      // scalar `specialty` or bounded specialty arrays; keeping both here
+      // lets the import contract carry them to the recruiting system for exact resolution.
+      specialty: cleanText(raw.specialty, 240),
+      specialties: textList([
+        ...(Array.isArray(raw.specialties) ? raw.specialties : []),
+        ...(Array.isArray(raw.subspecialties) ? raw.subspecialties : []),
+      ], 20),
+      subspecialties: textList(raw.subspecialties, 20),
       skills: textList(raw.skills, 100),
       licenses: textList(raw.licenses, 100),
       certifications: textList(raw.certifications, 100),
@@ -254,7 +264,8 @@
     const secondary = primary === right ? left : right;
     const merged = { ...secondary, ...primary };
     for (const field of [
-      "aliases", "roles", "employers", "schools", "skills", "licenses", "certifications",
+      "aliases", "roles", "employers", "schools", "specialties", "subspecialties",
+      "skills", "licenses", "certifications",
     ]) {
       merged[field] = textList([...(left[field] || []), ...(right[field] || [])], 100);
     }

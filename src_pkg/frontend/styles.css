@@ -197,6 +197,28 @@ input[readonly], textarea[readonly] { background: #f8f9fb; }
 .success-text { color: var(--go); }
 code { font-size: .92em; background: #f0f2f6; border-radius: 4px; padding: 1px 4px; }
 
+.privacy-page {
+  width: min(760px, calc(100% - 32px));
+  margin: 32px auto;
+  padding: 28px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  line-height: 1.6;
+}
+.privacy-page h1 { margin-top: 0; }
+.privacy-page h2 { margin-top: 24px; font-size: 18px; }
+.privacy-dialog { max-width: 620px; }
+.privacy-dialog p { line-height: 1.5; }
+.consent-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 18px 0;
+  font-weight: 650;
+}
+.consent-check input { width: auto; margin-top: 3px; }
+
 .notice {
   background: #fff9ec;
   border: 1px solid #f3e2b8;

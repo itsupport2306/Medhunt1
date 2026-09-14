@@ -6,6 +6,7 @@ const DEFAULT_BACKEND = "http://127.0.0.1:8091";
 const LOCAL_API_TOKEN = "__MEDHUNT_LOCAL_API_TOKEN__";
 const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";
 const AUTH_STORAGE_KEY = "medhuntHealthBoardSession";
+const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
 // A public-records lookup drives a real browser per person and cannot be
@@ -21,6 +22,7 @@ const SOURCING_PLATFORMS = {
     label: "Indeed",
     host: (hostname) => hostname === "indeed.com" || hostname.endsWith(".indeed.com"),
     contentScript: "indeed-content.js",
+    mainScript: "inject.js",
     adapterRevision: "indeed-capture-v5",
     adapterRequestType: "RADIXSOL_INDEED_V5_REQUEST",
     resumeCapture: true,
@@ -110,6 +112,8 @@ let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
 let authConfig = { enabled: false, provider: "healthboard" };
 let authSession = null;
+let privacyConsent = false;
+let extensionWorkspaceStarted = false;
 let pendingLogin = null;
 let jobs = [];
 let activeJobId = null;
@@ -733,19 +737,36 @@ function writeChromeSetting(key, value) {
   return new Promise((resolve) => chrome.storage.local.set({ [key]: value }, resolve));
 }
 
+function sessionStorageArea() {
+  // Session storage keeps the login token in memory for the browser session.
+  // The local fallback supports older managed Chromium builds, but current
+  // Chrome uses storage.session and does not persist the token to disk.
+  return chrome.storage.session || chrome.storage.local;
+}
+
+function readChromeSession(key) {
+  return new Promise((resolve) => sessionStorageArea().get(
+    [key], (result) => resolve(result[key]),
+  ));
+}
+
+function writeChromeSession(key, value) {
+  return new Promise((resolve) => sessionStorageArea().set({ [key]: value }, resolve));
+}
+
 async function loadAuth() {
   if (!IS_EXTENSION) return;
   try {
     authConfig = await api("/auth/config", { timeout: 6000 });
-    authSession = await readChromeSetting(AUTH_STORAGE_KEY) || null;
+    authSession = await readChromeSession(AUTH_STORAGE_KEY) || null;
     if (authConfig.enabled && authSession?.extension_token) {
       try {
         const current = await api("/auth/me", { timeout: 10000 });
         authSession.user = current.user;
-        await writeChromeSetting(AUTH_STORAGE_KEY, authSession);
+        await writeChromeSession(AUTH_STORAGE_KEY, authSession);
       } catch {
         authSession = null;
-        await writeChromeSetting(AUTH_STORAGE_KEY, null);
+        await writeChromeSession(AUTH_STORAGE_KEY, null);
       }
     }
   } catch {
@@ -825,7 +846,7 @@ async function verifyLoginCode() {
     extension_token: verified.extension_token,
     user: verified.user,
   };
-  await writeChromeSetting(AUTH_STORAGE_KEY, authSession);
+  await writeChromeSession(AUTH_STORAGE_KEY, authSession);
   pendingLogin = null;
   closeModal();
   renderAuthState();
@@ -837,9 +858,54 @@ async function verifyLoginCode() {
 
 async function logout() {
   authSession = null;
-  await writeChromeSetting(AUTH_STORAGE_KEY, null);
+  await writeChromeSession(AUTH_STORAGE_KEY, null);
   renderAuthState();
   notify("Signed out.");
+}
+
+function showPrivacyConsent() {
+  $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
+    <div class="dialog privacy-dialog" role="dialog" aria-modal="true" aria-labelledby="medhuntPrivacyTitle" aria-describedby="medhuntPrivacyDescription">
+      <h2 id="medhuntPrivacyTitle">Before Medhunt reads profile data</h2>
+      <div id="medhuntPrivacyDescription">
+        <p>Medhunt reads professional information visible on supported candidate pages. Nothing is sent while the page is only being detected.</p>
+        <p>When you select candidates and choose <strong>Find contact details</strong>, Medhunt sends the selected names, locations, roles, employers, education, specialties, and profile links to the Medhunt backend. It may then retrieve professional contact details, create or upload a resume, and send the resulting candidate record to your configured recruiting system.</p>
+        <p>Use Medhunt only for candidate data your organization is authorized to process. Medhunt does not send outreach automatically.</p>
+      </div>
+      <label class="consent-check"><input id="medhuntPrivacyAgreement" type="checkbox"> <span>I understand and agree to this candidate-data processing.</span></label>
+      <div class="row modal-actions">
+        <button type="button" class="btn ghost" data-action="open-privacy">Read privacy notice</button>
+        <button type="button" class="btn ghost" data-action="decline-privacy">Not now</button>
+        <button type="button" class="btn teal" data-action="accept-privacy">Agree and continue</button>
+      </div>
+    </div></div>`;
+}
+
+async function openPrivacyNotice() {
+  const url = `${apiBase}/privacy`;
+  await chrome.tabs.create({ url, active: true });
+}
+
+async function declinePrivacyConsent() {
+  privacyConsent = false;
+  await writeChromeSetting(PRIVACY_CONSENT_KEY, false);
+  closeModal();
+  clearCapturedProfileState("consent-required");
+  renderSourcingStatus(
+    "Consent required",
+    "Medhunt will not read or transmit candidate profile data until you review and accept the data-use notice.",
+    { retry: false },
+  );
+}
+
+async function acceptPrivacyConsent() {
+  if (!$("#medhuntPrivacyAgreement")?.checked) {
+    throw new Error("Select the agreement checkbox before continuing.");
+  }
+  privacyConsent = true;
+  await writeChromeSetting(PRIVACY_CONSENT_KEY, true);
+  closeModal();
+  await startExtensionWorkspace();
 }
 
 const PASSIVE_TAB_CONTEXT_REASONS = new Set(["activated", "window-focused", "removed"]);
@@ -1000,6 +1066,9 @@ async function sendIndeedResumeMessage(message, sourceTabId = 0) {
     if (response?.adapter_revision === SOURCING_PLATFORMS.indeed.adapterRevision) return response;
     throw new Error("The Indeed page adapter needs to be refreshed.");
   } catch {
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id }, files: [SOURCING_PLATFORMS.indeed.mainScript], world: "MAIN",
+    });
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["indeed-content.js"] });
     return sendTabMessage(tab.id, currentMessage);
   }
@@ -1206,6 +1275,7 @@ function usNewsImportPayload(profile) {
     }
     return output;
   };
+  const specialties = profileSpecialties(profile, list);
   return {
     name: bounded(profile.name, 200),
     location: bounded(profile.location, 500),
@@ -1214,12 +1284,26 @@ function usNewsImportPayload(profile) {
     roles: list(profile.roles, 20),
     employers: list(profile.employers, 20),
     schools: list(profile.schools, 20),
+    specialties,
     alternate_names: list([...(profile.alternate_names || []), ...(profile.aliases || [])], 10, 160),
     notes: bounded(profile.notes, 20000),
     source: "usnews",
     source_url: bounded(profile.source_url, 2000),
     source_id: bounded(profile.source_id, 500),
   };
+}
+
+// Keep source-declared specialty labels separate from generic skills. This
+// accepts structured adapter fields and explicit Specialty: notes emitted by
+// healthcare-directory adapters, without guessing that an arbitrary skill or
+// headline is a recruiting-system specialty.
+function profileSpecialties(profile, list) {
+  const values = [profile?.specialty, ...(Array.isArray(profile?.specialties) ? profile.specialties : [])];
+  for (const line of String(profile?.notes || "").split(/\r?\n/)) {
+    const match = line.match(/^specialt(?:y|ies)\s*:\s*(.+)$/i);
+    if (match) values.push(...match[1].split(/\s*[;,|]\s*/));
+  }
+  return list(values, 20, 240);
 }
 
 async function enrichUsNewsProfileAndResume(profile) {
@@ -2091,14 +2175,17 @@ async function ensureProfessionalProfileResume(profile) {
   return pending;
 }
 
-async function saveDisplayedIndeedCandidates(searchUrl) {
-  if (!indeedCandidates.length) {
-    showIndeedSaveStatus("muted", "No displayed profiles to save.");
+async function saveDisplayedIndeedCandidates(searchUrl, requestedProfiles = indeedCandidates) {
+  const candidates = Array.isArray(requestedProfiles) ? requestedProfiles.filter(Boolean) : [];
+  if (!candidates.length) {
+    showIndeedSaveStatus("muted", "No selected profiles to save.");
     return null;
   }
-  const contextKey = activeSourcingContextKey || `${activeSourcingPlatform.key}|${searchUrl || ""}`;
+  const selectionKey = candidates.map((profile) => profile._selectionKey || profile.source_id || "")
+    .sort().join("|");
+  const contextKey = `${activeSourcingContextKey || `${activeSourcingPlatform.key}|${searchUrl || ""}`}|${selectionKey}`;
   if (indeedSavePromises.has(contextKey)) return indeedSavePromises.get(contextKey);
-  const snapshot = indeedCandidates.map((profile) => ({ ...profile }));
+  const snapshot = candidates.map((profile) => ({ ...profile }));
   const savePromise = performDisplayedIndeedSave(searchUrl, snapshot, contextKey);
   indeedSavePromises.set(contextKey, savePromise);
   try {
@@ -2157,6 +2244,7 @@ async function performDisplayedIndeedSave(searchUrl) {
     roles: boundedList(profile.roles, 20),
     employers: boundedList(profile.employers, 20),
     schools: boundedList(profile.schools, 20),
+    specialties: profileSpecialties(profile, boundedList),
     alternate_names: boundedList([
       ...(Array.isArray(profile.alternate_names) ? profile.alternate_names : []),
       ...(Array.isArray(profile.aliases) ? profile.aliases : []),
@@ -2228,6 +2316,10 @@ async function performDisplayedIndeedSave(searchUrl) {
 
 async function scanIndeedCandidates(options = {}) {
   const { quiet = false, preserveSelection = false } = options;
+  if (IS_EXTENSION && !privacyConsent) {
+    if (!quiet) showPrivacyConsent();
+    return;
+  }
   if (sourcingWorkInProgress()) {
     if (!quiet) notify(
       indeedResumeBatchState.active
@@ -2395,8 +2487,9 @@ async function scanIndeedCandidates(options = {}) {
       );
       return;
     }
+    // Detection stays inside the browser. Candidate data is imported only
+    // after the recruiter explicitly starts a lookup or resume capture.
     renderIndeedProfiles(result);
-    await saveDisplayedIndeedCandidates(result.page_url);
   } catch (error) {
     if (scanContext?.key && scanContext.key !== activeSourcingContextKey) return;
     if (quiet) {
@@ -2425,6 +2518,14 @@ async function viewIndeed() {
 
 async function synchronizeActiveSourcingTab(reason = "changed") {
   if (!IS_EXTENSION || activeView !== "indeed") return;
+  if (!privacyConsent) {
+    renderSourcingStatus(
+      "Consent required",
+      "Review the data-use notice before Medhunt reads candidate profile information.",
+      { retry: false },
+    );
+    return;
+  }
   if (sourcingWorkInProgress()) {
     pendingSourcingContext = { reason };
     return;
@@ -2669,7 +2770,7 @@ async function captureLinkedinPdf(index) {
   if (!profile || activeSourcingPlatform.key !== "linkedin") {
     throw new Error("Open the captured profile first.");
   }
-  if (!profile._candidateId) await saveDisplayedIndeedCandidates(activeSourcingPageUrl);
+  if (!profile._candidateId) await saveDisplayedIndeedCandidates(activeSourcingPageUrl, [profile]);
   if (!profile._candidateId) throw new Error("The profile is not ready for resume capture.");
 
   const { tab, platform } = await activeSourcingTab(false);
@@ -2837,7 +2938,7 @@ async function lookupSelectedIndeedCandidates() {
   renderIndeedProfiles();
 
   if (profiles.some((profile) => !profile._candidateId)) {
-    const saved = await saveDisplayedIndeedCandidates(activeSourcingPageUrl);
+    const saved = await saveDisplayedIndeedCandidates(activeSourcingPageUrl, profiles);
     if (!saved && profiles.some((profile) => !profile._candidateId)) {
       throw new Error(
         `${activeSourcingPlatform.label} profiles could not be saved. ` +
@@ -3662,6 +3763,16 @@ const views = {
 };
 
 async function go(view) {
+  if (IS_EXTENSION && !privacyConsent) {
+    activeView = "indeed";
+    renderSourcingStatus(
+      "Consent required",
+      "Review the data-use notice before using Medhunt candidate workflows.",
+      { retry: false },
+    );
+    showPrivacyConsent();
+    return;
+  }
   activeView = views[view] ? view : "candidates";
   document.querySelectorAll(".nav-link").forEach((link) => {
     link.classList.toggle("active", link.dataset.view === activeView);
@@ -3749,6 +3860,9 @@ document.addEventListener("click", async (event) => {
     "request-login-code": requestLoginCode,
     "verify-login-code": verifyLoginCode,
     "logout": logout,
+    "open-privacy": openPrivacyNotice,
+    "decline-privacy": declinePrivacyConsent,
+    "accept-privacy": acceptPrivacyConsent,
     "retry": retry,
     "refresh-indeed": scanIndeedCandidates,
     "clear-candidate-filter": () => {
@@ -3803,6 +3917,32 @@ document.addEventListener("click", async (event) => {
   if (actions[action]) await withBusy(button, actions[action]);
 });
 
+async function startExtensionWorkspace() {
+  if (extensionWorkspaceStarted || !privacyConsent) return;
+  extensionWorkspaceStarted = true;
+  await loadAuth();
+  if (authConfig.enabled && !authSession?.extension_token) {
+    await login();
+  }
+  activeView = "indeed";
+  renderSourcingStatus(
+    "Detecting candidate page",
+    "The panel follows the active tab automatically.",
+    { retry: false },
+  );
+  const servicePromise = refreshHealth().then(async (health) => {
+    if (!health) return;
+    try {
+      await loadJobs();
+    } catch {
+      setConnection();
+    }
+    await processPendingResumeEvents();
+  });
+  await synchronizeActiveSourcingTab("startup");
+  await servicePromise;
+}
+
 (async function initialize() {
   if (!IS_EXTENSION) {
     document.querySelector("[data-view='indeed']")?.classList.add("hidden");
@@ -3811,27 +3951,18 @@ document.addEventListener("click", async (event) => {
   }
   await loadBackendConfig();
   if (IS_EXTENSION) {
-    await loadAuth();
-    if (authConfig.enabled && !authSession?.extension_token) {
-      await login();
-    }
     activeView = "indeed";
-    renderSourcingStatus(
-      "Detecting candidate page",
-      "The panel follows the active tab automatically.",
-      { retry: false },
-    );
-    const servicePromise = refreshHealth().then(async (health) => {
-      if (!health) return;
-      try {
-        await loadJobs();
-      } catch {
-        setConnection();
-      }
-      await processPendingResumeEvents();
-    });
-    await synchronizeActiveSourcingTab("startup");
-    await servicePromise;
+    privacyConsent = (await readChromeSetting(PRIVACY_CONSENT_KEY)) === true;
+    if (!privacyConsent) {
+      renderSourcingStatus(
+        "Review required",
+        "Medhunt will not read or transmit candidate profile data until you accept the data-use notice.",
+        { retry: false },
+      );
+      showPrivacyConsent();
+      return;
+    }
+    await startExtensionWorkspace();
     return;
   }
   const health = await refreshHealth();

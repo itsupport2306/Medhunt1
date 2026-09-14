@@ -3194,6 +3194,35 @@ def test_local_api_token_protects_cross_origin_api_access(monkeypatch):
             assert preflight.status_code == 200
 
     asyncio.run(exercise_gate())
+
+
+def test_hosted_extension_origin_gate_fails_closed(monkeypatch):
+    extension_origin = f"chrome-extension://{'b' * 32}"
+    monkeypatch.setattr(config, "EXTENSION_ALLOW_UNLISTED_ORIGINS", False)
+    monkeypatch.setattr(config, "EXTENSION_ALLOWED_ORIGINS", ())
+
+    async def exercise_gate():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://medhunt.test"
+        ) as client:
+            blocked = await client.get(
+                "/health", headers={"Origin": extension_origin}
+            )
+            assert blocked.status_code == 403
+            assert blocked.json()["detail"] == (
+                "This extension installation is not authorized."
+            )
+
+            monkeypatch.setattr(
+                config, "EXTENSION_ALLOWED_ORIGINS", (extension_origin,)
+            )
+            allowed = await client.get(
+                "/health", headers={"Origin": extension_origin}
+            )
+            assert allowed.status_code == 200
+
+    asyncio.run(exercise_gate())
     titles = {job["title"] for job in store.list_jobs()}
     assert titles == {"Authenticated extension job", "Same-origin job"}
 
@@ -3228,7 +3257,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.22.15"
+            assert health_body["version"] == "3.23.0"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3576,7 +3605,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.22.15"
+    assert manifest["version"] == "3.23.0"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -3605,50 +3634,24 @@ def test_frontend_is_manifest_v3_compatible():
     assert "scripting" in manifest["permissions"]
     assert "downloads" in manifest["permissions"]
     assert "debugger" in manifest["permissions"]
-    assert any(
-        "indeed-content.js" in script["js"]
-        for script in manifest["content_scripts"]
-    )
-    assert any(
-        "inject.js" in script["js"] and script.get("world") == "MAIN"
-        for script in manifest["content_scripts"]
-    )
-    assert any(
-        "platform-main.js" in script["js"] and script.get("world") == "MAIN"
-        for script in manifest["content_scripts"]
-    )
-    assert any("platform-content.js" in script["js"] for script in manifest["content_scripts"])
-    assert any(
-        "linkedin-content.js" in script["js"]
-        for script in manifest["content_scripts"]
-    )
-    assert any(
-        "linkedin-content.js" in script["js"]
-        and "*://*.linkedin.com/search/results/people/*" in script["matches"]
-        and "*://*.linkedin.com/search/results/all*" in script["matches"]
-        for script in manifest["content_scripts"]
-    )
-    assert any(
-        "facebook-content.js" in script["js"]
-        for script in manifest["content_scripts"]
-    )
-    assert any(
-        "healthcare-directory-content.js" in script["js"]
-        and "*://npino.com/*" in script["matches"]
-        and "https://eservices.nysed.gov/*" in script["matches"]
-        and "*://npiprofile.com/*" in script["matches"]
-        and "https://health.usnews.com/doctors/*" in script["matches"]
-        and "https://health.usnews.com/nurse-practitioners/*" in script["matches"]
-        for script in manifest["content_scripts"]
-    )
+    # Adapters are injected after first-run consent; the manifest must not read
+    # supported pages merely because the extension was installed.
+    assert manifest["content_scripts"] == []
+    assert 'mainScript: "inject.js"' in app_script
+    assert 'contentScript: "indeed-content.js"' in app_script
+    assert 'mainScript: "platform-main.js"' in app_script
+    assert 'contentScript: "platform-content.js"' in app_script
+    assert 'contentScript: "linkedin-content.js"' in app_script
+    assert 'contentScript: "facebook-content.js"' in app_script
+    assert 'contentScript: "healthcare-directory-content.js"' in app_script
     inject_script = (frontend / "inject.js").read_text(encoding="utf-8")
     assert "URL.createObjectURL" in inject_script
     assert "XMLHttpRequest" in inject_script
     assert "response.clone().arrayBuffer()" in inject_script
-    assert not any(
-        any("usphonebook" in filename.lower() for filename in script["js"])
-        for script in manifest["content_scripts"]
-    )
+    assert "medhuntProfileDataConsentV1" in app_script
+    assert "storage.session" in app_script
+    assert "await saveDisplayedIndeedCandidates(result.page_url);" not in app_script
+    assert (frontend / "privacy.html").is_file()
     assert "RADIXSOL_CAPTURE_INDEED_PROFILE" in content_script
     assert "RADIXSOL_LIST_INDEED_CANDIDATES" in content_script
     assert "RADIXSOL_SCAN_INDEED_CANDIDATES" in content_script
@@ -3780,6 +3783,7 @@ def test_chrome_store_package_is_minimal_and_contains_no_private_provider_detail
     with zipfile.ZipFile(output) as archive:
         names = set(archive.namelist())
         assert "manifest.json" in names
+        assert "privacy.html" in names
         assert "icons/medhunt-128.png" in names
         assert not any("watcher" in name.casefold() for name in names)
         manifest = json.loads(archive.read("manifest.json"))
@@ -3905,7 +3909,7 @@ def test_installer_refreshes_baseline_and_preserves_non_storage_admin_override(m
     assert spec.loader is not None
     spec.loader.exec_module(installer)
 
-    assert installer.APP_VERSION == "3.22.15"
+    assert installer.APP_VERSION == "3.23.0"
     assert "medhunt" in installer.APP_NAME.casefold()
     assert "radixsol" not in installer.APP_NAME.casefold()
     assert "medhunt" in installer.RUN_VALUE.casefold()
@@ -4056,7 +4060,7 @@ def test_windows_version_resources_use_current_medhunt_branding():
     for resource in (setup_version, backend_version):
         assert "filevers=(3,22,15,0)" in resource
         assert "prodvers=(3,22,15,0)" in resource
-        assert "3.22.15" in resource
+        assert "3.23.0" in resource
         assert "Medhunt" in resource
         assert "Radixsol Sourcing Assistant" not in resource
 

@@ -33,7 +33,7 @@ ROOT_PUBLIC_FILES = {
     "app.js", "background.js", "facebook-content.js",
     "healthcare-directory-content.js", "indeed-content.js", "index.html",
     "inject.js", "linkedin-content.js", "manifest.json",
-    "platform-content.js", "platform-main.js", "profile-quality.js",
+    "platform-content.js", "platform-main.js", "privacy.html", "profile-quality.js",
     "styles.css",
 }
 
@@ -63,9 +63,23 @@ def harden(stage: Path, api_base: str) -> None:
     expected = 'const DEFAULT_BACKEND = "http://127.0.0.1:8091";'
     if app.count(expected) != 1:
         raise RuntimeError("Could not locate the development backend marker exactly once.")
-    app_path.write_text(app.replace(
-        expected, f'const DEFAULT_BACKEND = {json.dumps(api_base)};',
-    ), encoding="utf-8", newline="\n")
+    app = app.replace(expected, f'const DEFAULT_BACKEND = {json.dumps(api_base)};')
+    local_validation = (
+        '  const local = parsed.protocol === "http:" && '
+        '["127.0.0.1", "localhost"].includes(parsed.hostname);\n'
+        '  if ((!local && parsed.protocol !== "https:") || parsed.username || parsed.password) {\n'
+        '    throw new Error("Use HTTP on localhost for development or HTTPS for a hosted backend.");\n'
+        '  }'
+    )
+    public_validation = (
+        '  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {\n'
+        '    throw new Error("Use an HTTPS hosted backend.");\n'
+        '  }'
+    )
+    if app.count(local_validation) != 1:
+        raise RuntimeError("Could not locate the development URL validation exactly once.")
+    app = app.replace(local_validation, public_validation)
+    app_path.write_text(app, encoding="utf-8", newline="\n")
 
     manifest_path = stage / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -111,6 +125,8 @@ def audit(stage: Path, api_base: str) -> None:
         if not path.is_file() or path.suffix.lower() not in {".js", ".json", ".html", ".css"}:
             continue
         content = path.read_text(encoding="utf-8").casefold()
+        if "localhost" in content or "127.0.0.1" in content:
+            raise RuntimeError(f"Development backend reference found in {path.name}.")
         found = [term for term in FORBIDDEN_CLIENT_TERMS if term in content]
         if found:
             raise RuntimeError(

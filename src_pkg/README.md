@@ -589,6 +589,18 @@ provide either `NEXUS_CLIENT_ID` plus `NEXUS_CLIENT_SECRET` or
 included in the browser extension. A trusted-team installer can also resolve
 the allowlisted settings from `NEXUS_REFERENCE_ENV` and
 `NEXUS_REFERENCE_CONFIG` while it is built.
+
+For a hosted deployment, add the production Chrome extension origin after the
+Chrome Web Store assigns its ID:
+
+```text
+MEDHUNT_EXTENSION_ORIGINS=chrome-extension://<32-character-extension-id>
+MEDHUNT_ALLOW_UNLISTED_EXTENSION_ORIGINS=0
+```
+
+Render deployments fail closed for browser-extension origins when that value
+is absent. Upload the extension as a draft, copy its assigned ID, configure the
+origin in Render, redeploy the backend, and then publish the extension.
 `NEXUS_RESUME_DOC_TYPE_ID`, state/name mappings, and the timeout/worker settings
 in `.env.example` are optional tenant overrides.
 `NEXUS_DEFAULT_PROFILE` must provide valid tenant routing, including at least

@@ -33,7 +33,7 @@ MOCK_SCRIPT = r"""() => {
   const state = window.__panelTest = {
     activeId: 1,
     instanceId: `panel-${Date.now()}-${Math.random()}`,
-    local: {},
+    local: { medhuntProfileDataConsentV1: true },
     sentRuntime: [],
     scanCalls: {},
     fetchPaths: [],

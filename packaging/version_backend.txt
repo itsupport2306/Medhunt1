@@ -4,10 +4,10 @@ VSVersionInfo(
   kids=[StringFileInfo([StringTable('040904B0', [
     StringStruct('CompanyName', 'Radixsol'),
     StringStruct('FileDescription', 'Medhunt local service'),
-    StringStruct('FileVersion', '3.22.15'),
+    StringStruct('FileVersion', '3.23.0'),
     StringStruct('InternalName', 'RadixsolBackend'),
     StringStruct('OriginalFilename', 'RadixsolBackend.exe'),
     StringStruct('ProductName', 'Medhunt'),
-    StringStruct('ProductVersion', '3.22.15')])]),
+    StringStruct('ProductVersion', '3.23.0')])]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])]
 )

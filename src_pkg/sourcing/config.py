@@ -103,6 +103,32 @@ HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )
 
+# Hosted browser clients must be explicitly allowlisted once Chrome assigns
+# the production extension ID. Local development keeps the broad extension
+# origin rule unless the operator opts into strict mode.
+_EXTENSION_ORIGIN_PATTERN = re.compile(
+    r"^(?:chrome-extension://[a-p]{32}|moz-extension://[A-Za-z0-9-]+)$"
+)
+_extension_origins_raw = os.getenv("MEDHUNT_EXTENSION_ORIGINS", "").strip()
+EXTENSION_ALLOWED_ORIGINS = tuple(dict.fromkeys(
+    value.strip().rstrip("/")
+    for value in _extension_origins_raw.split(",")
+    if value.strip()
+))
+_invalid_extension_origins = [
+    value for value in EXTENSION_ALLOWED_ORIGINS
+    if not _EXTENSION_ORIGIN_PATTERN.fullmatch(value)
+]
+if _invalid_extension_origins:
+    raise RuntimeError(
+        "MEDHUNT_EXTENSION_ORIGINS contains an invalid browser extension origin."
+    )
+_hosted_runtime = os.getenv("RENDER", "").strip().lower() in ("1", "true", "yes")
+EXTENSION_ALLOW_UNLISTED_ORIGINS = os.getenv(
+    "MEDHUNT_ALLOW_UNLISTED_EXTENSION_ORIGINS",
+    "0" if _hosted_runtime else "1",
+).strip().lower() in ("1", "true", "yes")
+
 # ---- Enformion / Endato API ----
 ENFORMION_URL = os.getenv(
     "ENFORMION_URL", "https://devapi.enformion.com/PersonSearch"

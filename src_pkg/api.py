@@ -52,7 +52,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.22.15"
+APP_VERSION = "3.23.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -64,7 +64,11 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origin_regex=r"^(chrome-extension|moz-extension)://[a-z0-9-]+$",
+    allow_origins=list(config.EXTENSION_ALLOWED_ORIGINS),
+    allow_origin_regex=(
+        r"^(?:chrome-extension://[a-p]{32}|moz-extension://[A-Za-z0-9-]+)$"
+        if config.EXTENSION_ALLOW_UNLISTED_ORIGINS else None
+    ),
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=[
         "Content-Type", "X-Medhunt-Token", "X-HealthBoard-Extension-Token",
@@ -73,7 +77,7 @@ app.add_middleware(
 
 
 _PUBLIC_LOCAL_PATHS = frozenset({
-    "/", "/app.js", "/styles.css", "/health", "/auth/config",
+    "/", "/app.js", "/styles.css", "/privacy", "/health", "/auth/config",
     "/auth/request-code", "/auth/verify-code",
 })
 
@@ -112,6 +116,22 @@ async def authenticate_local_api_requests(request: Request, call_next):
     protected_cross_origin = bool(
         origin and not _is_same_loopback_origin(request, origin)
     )
+    if origin.startswith(("chrome-extension://", "moz-extension://")):
+        permitted_origin = (
+            origin.rstrip("/") in config.EXTENSION_ALLOWED_ORIGINS
+            or (
+                config.EXTENSION_ALLOW_UNLISTED_ORIGINS
+                and re.fullmatch(
+                    r"(?:chrome-extension://[a-p]{32}|moz-extension://[A-Za-z0-9-]+)",
+                    origin.rstrip("/"),
+                )
+            )
+        )
+        if not permitted_origin:
+            return JSONResponse(
+                {"detail": "This extension installation is not authorized."},
+                status_code=403,
+            )
     request.state.user = None
     request.state.healthboard_extension_token = ""
     if (
@@ -178,6 +198,10 @@ class ProfileImportIn(BaseModel):
     # second-pass contact lookup only.
     hometown: str = ""
     headline: str = ""
+    # Specialty labels are captured when a source platform exposes them. They
+    # are persisted as bounded, explicit evidence lines so the Nexus delivery
+    # worker can resolve the exact tenant specialty master record later.
+    specialties: list[str] = Field(default_factory=list, max_length=20)
     # Adapters may send structured, source-visible context in addition to the
     # raw notes.  The server serializes these into canonical evidence tags so
     # every provider/verification path consumes the same bounded facts.
@@ -418,6 +442,11 @@ def styles():
     return FileResponse(str(_FRONTEND_DIR / "styles.css"), media_type="text/css")
 
 
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+def privacy_notice():
+    return FileResponse(str(_FRONTEND_DIR / "privacy.html"), media_type="text/html")
+
+
 @app.get("/app.js", include_in_schema=False)
 def frontend_script():
     return FileResponse(
@@ -614,6 +643,8 @@ def _profile_row(body: ProfileImportIn, default_job_id: int | None = None):
         add_evidence_line(evidence_lines, "Employer", value)
     for value in source_values(body.schools, limit=10):
         add_evidence_line(evidence_lines, "School", value)
+    for value in source_values(body.specialties, limit=20):
+        add_evidence_line(evidence_lines, "Specialty", value)
     for value in source_values(body.alternate_names, limit=8, max_chars=160):
         alternate = person_name.normalize_person_name(value)
         if len(person_name.identity_tokens(alternate)) >= 2:
