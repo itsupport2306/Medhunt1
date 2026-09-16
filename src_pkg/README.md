@@ -83,6 +83,7 @@ selects resources dedicated to this application:
 ```text
 DATABASE_BACKEND=postgresql
 DATABASE_NAME=radixsol_sourcing
+MEDHUNT_DATABASE_SCHEMA=medhunt
 STORAGE_ENABLED=1
 S3_BUCKET=radixsol-sourcing-resumes
 ```
@@ -91,6 +92,7 @@ Important settings:
 
 ```text
 DATABASE_URL=<pooled Neon PostgreSQL connection>
+MEDHUNT_DATABASE_SCHEMA=medhunt
 ENFORMION_AP_NAME=<licensed access profile>
 ENFORMION_AP_PASSWORD=<licensed password>
 PDL_API_KEY=<server-side key>
@@ -114,7 +116,10 @@ TWILIO_AUTH_TOKEN=<optional>
 
 When `DATABASE_BACKEND=sqlite`, the application ignores `DATABASE_URL` even if
 the operating system or `.env` contains one. To enable Neon later, replace the
-local override only after creating the dedicated Medhunt database.
+local override only after creating the dedicated Medhunt database. If a
+PostgreSQL database is shared with Nexus, Medhunt uses the isolated `medhunt`
+schema by default so tables such as `users` and `candidates` cannot collide
+with the other application.
 When `STORAGE_ENABLED=1`, downloaded resume PDFs are uploaded to the configured
 private Cloudflare R2 bucket. The database stores the R2 object key, checksum,
 MIME type, and size alongside the candidate record. Keep it disabled until the

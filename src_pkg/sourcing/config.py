@@ -341,6 +341,11 @@ if DATABASE_URL and DATABASE_NAME:
         raise RuntimeError("DATABASE_NAME may contain only letters, numbers, and underscores.")
     parsed_database_url = urlsplit(DATABASE_URL)
     DATABASE_URL = urlunsplit(parsed_database_url._replace(path=f"/{quote(DATABASE_NAME)}"))
+DATABASE_SCHEMA = os.getenv("MEDHUNT_DATABASE_SCHEMA", "medhunt").strip() or "medhunt"
+if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,62}", DATABASE_SCHEMA):
+    raise RuntimeError(
+        "MEDHUNT_DATABASE_SCHEMA must be a valid PostgreSQL identifier."
+    )
 _db_path = Path(os.getenv("SOURCING_DB", "sourcing.db")).expanduser()
 if _USES_APP_HOME_LAYOUT and not _db_path.is_absolute():
     _db_path = DATA_DIR / _db_path

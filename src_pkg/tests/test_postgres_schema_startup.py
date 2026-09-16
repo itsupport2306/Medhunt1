@@ -36,18 +36,32 @@ class _FakeConnection:
 def test_prepare_postgres_skips_schema_replay_when_database_is_current(monkeypatch):
     connection = _FakeConnection(True)
     monkeypatch.setattr(store, "_POSTGRES_SCHEMA_READY", False)
+    monkeypatch.setattr(store.config, "DATABASE_SCHEMA", "medhunt")
 
     store._prepare_postgres(connection)
 
     assert store._POSTGRES_SCHEMA_READY is True
     assert len(connection.queries) == 1
     query = connection.queries[0][0]
-    assert "to_regclass('public.candidates')" in query
+    assert "to_regclass('medhunt.candidates')" in query
+    assert "table_schema = 'medhunt'" in query
     assert "table_name = 'enrichment_events'" in query
     assert "column_name = 'candidate_id'" in query
     assert "column_name = 'contact_expires_at'" in query
-    assert "to_regclass('public.idx_nexus_deliveries_ready')" in query
-    assert "to_regclass('public.watcher_email_deliveries')" in query
+    assert "to_regclass('medhunt.idx_nexus_deliveries_ready')" in query
+    assert "to_regclass('medhunt.watcher_email_deliveries')" in query
+
+
+def test_postgres_namespace_is_created_and_selected(monkeypatch):
+    connection = _FakeConnection(True)
+    monkeypatch.setattr(store.config, "DATABASE_SCHEMA", "medhunt")
+
+    store._configure_postgres_namespace(connection)
+
+    assert connection.queries == [
+        ('CREATE SCHEMA IF NOT EXISTS "medhunt"', ()),
+        ('SET search_path TO "medhunt"', ()),
+    ]
 
 
 def test_prepare_postgres_runs_migrations_when_schema_is_incomplete(monkeypatch):

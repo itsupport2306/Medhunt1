@@ -408,15 +408,25 @@ def _prepare_postgres(connection):
         _POSTGRES_SCHEMA_READY = True
 
 
+def _configure_postgres_namespace(connection):
+    """Keep Medhunt tables isolated from other apps sharing the database."""
+    schema = config.DATABASE_SCHEMA
+    # DATABASE_SCHEMA is validated as a PostgreSQL identifier in config.py.
+    quoted_schema = '"' + schema.replace('"', '""') + '"'
+    connection.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
+    connection.execute(f"SET search_path TO {quoted_schema}")
+
+
 def _postgres_schema_is_current(connection):
     """Return true when the remote schema already contains every dependency."""
+    schema = config.DATABASE_SCHEMA
     relations = _POSTGRES_REQUIRED_TABLES + _POSTGRES_REQUIRED_INDEXES
     relation_checks = [
-        f"to_regclass('public.{name}') IS NOT NULL" for name in relations
+        f"to_regclass('{schema}.{name}') IS NOT NULL" for name in relations
     ]
     column_checks = [
         "EXISTS (SELECT 1 FROM information_schema.columns "
-        "WHERE table_schema = current_schema() "
+        f"WHERE table_schema = '{schema}' "
         f"AND table_name = '{table}' AND column_name = '{column}')"
         for table, columns in _POSTGRES_REQUIRED_COLUMNS.items()
         for column in columns
@@ -455,8 +465,11 @@ def _conn():
                     autocommit=True,
                     connect_timeout=config.DATABASE_CONNECT_TIMEOUT,
                 )
+                connection = _Connection(raw, postgres=True)
+                _configure_postgres_namespace(connection)
                 _POSTGRES_CONNECTION = raw
-            connection = _Connection(raw, postgres=True)
+            else:
+                connection = _Connection(raw, postgres=True)
             try:
                 _prepare_postgres(connection)
                 yield connection
