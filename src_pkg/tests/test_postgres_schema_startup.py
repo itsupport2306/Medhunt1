@@ -43,6 +43,8 @@ def test_prepare_postgres_skips_schema_replay_when_database_is_current(monkeypat
     assert len(connection.queries) == 1
     query = connection.queries[0][0]
     assert "to_regclass('public.candidates')" in query
+    assert "table_name = 'enrichment_events'" in query
+    assert "column_name = 'candidate_id'" in query
     assert "column_name = 'contact_expires_at'" in query
     assert "to_regclass('public.idx_nexus_deliveries_ready')" in query
     assert "to_regclass('public.watcher_email_deliveries')" in query
@@ -57,6 +59,23 @@ def test_prepare_postgres_runs_migrations_when_schema_is_incomplete(monkeypatch)
     assert store._POSTGRES_SCHEMA_READY is True
     assert len(connection.queries) == 1 + len(store._POSTGRES_SCHEMA)
     assert connection.queries[1][0] == store._POSTGRES_SCHEMA[0]
+
+
+def test_legacy_enrichment_events_migration_adds_candidate_id_before_index():
+    migration = (
+        "ALTER TABLE enrichment_events "
+        "ADD COLUMN IF NOT EXISTS candidate_id BIGINT"
+    )
+    column_migration_index = store._POSTGRES_SCHEMA.index(migration)
+    index_creation_index = next(
+        index for index, statement in enumerate(store._POSTGRES_SCHEMA)
+        if statement.startswith(
+            "CREATE INDEX IF NOT EXISTS idx_enrichment_events_candidate"
+        )
+    )
+
+    assert "candidate_id" in store._POSTGRES_REQUIRED_COLUMNS["enrichment_events"]
+    assert column_migration_index < index_creation_index
 
 
 def test_nexus_startup_migration_selects_only_legacy_identity_keys(monkeypatch):

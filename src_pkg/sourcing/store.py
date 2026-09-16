@@ -247,6 +247,11 @@ _POSTGRES_SCHEMA = (
          last_error TEXT DEFAULT '', created DOUBLE PRECISION,
          updated DOUBLE PRECISION, UNIQUE(event_id, recipient)
        )""",
+    # Older deployments created this table before candidate-level attribution
+    # was added. CREATE TABLE IF NOT EXISTS does not evolve an existing table,
+    # so add the nullable column before creating its index. Historical events
+    # remain intact; new writes always provide a candidate_id.
+    "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS hometown TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''",
@@ -315,6 +320,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "watcher_email_deliveries",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
+    "enrichment_events": ("candidate_id",),
     "candidates": (
         "hometown", "source", "source_url", "source_id", "verification",
         "canonical_name", "identity_status", "identity_score",
