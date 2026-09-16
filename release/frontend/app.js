@@ -276,13 +276,7 @@ async function api(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const headers = new Headers(fetchOptions.headers || {});
-    if (LOCAL_API_TOKEN && !LOCAL_API_TOKEN.startsWith("__MEDHUNT_")) {
-      headers.set("X-Medhunt-Token", LOCAL_API_TOKEN);
-    }
-    if (authSession?.extension_token) {
-      headers.set("X-HealthBoard-Extension-Token", authSession.extension_token);
-    }
+    const headers = authenticatedApiHeaders(fetchOptions.headers);
     const response = await fetch(`${apiBase}${path}`, {
       ...fetchOptions,
       headers,
@@ -808,6 +802,52 @@ async function writeChromeSession(key, value) {
   if (chrome.storage.session) {
     await new Promise((resolve) => chrome.storage.session.remove([key], resolve));
   }
+}
+
+function authenticatedApiHeaders(initialHeaders = {}) {
+  const headers = new Headers(initialHeaders || {});
+  if (LOCAL_API_TOKEN && !LOCAL_API_TOKEN.startsWith("__MEDHUNT_")) {
+    headers.set("X-Medhunt-Token", LOCAL_API_TOKEN);
+  }
+  if (authSession?.extension_token) {
+    headers.set("X-HealthBoard-Extension-Token", authSession.extension_token);
+  }
+  return headers;
+}
+
+async function fetchStoredResumeBlob(candidateId, resumeId) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 60000);
+  try {
+    const response = await fetch(
+      `${apiBase}/candidates/${Number(candidateId)}/resumes/${Number(resumeId)}`,
+      { headers: authenticatedApiHeaders(), signal: controller.signal },
+    );
+    if (!response.ok) {
+      const type = response.headers.get("content-type") || "";
+      const payload = type.includes("application/json")
+        ? await response.json()
+        : await response.text();
+      const detail = payload && typeof payload === "object" ? payload.detail : payload;
+      const requestError = new Error(detail || `Backend returned ${response.status}.`);
+      requestError.status = response.status;
+      throw requestError;
+    }
+    const blob = await response.blob();
+    if (!blob.size || /application\/json/i.test(blob.type || "")) {
+      throw new Error("The stored resume response was not a PDF file.");
+    }
+    return blob;
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("The resume download timed out.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function releaseResumeBlobUrlLater(url, delay = 300000) {
+  setTimeout(() => URL.revokeObjectURL(url), delay);
 }
 
 async function loadAuth() {
@@ -3313,11 +3353,20 @@ async function saveStoredResumeDownload(profile, candidateId, resume) {
     .replace(/[^a-z0-9 _-]/gi, "_")
     .trim()
     .replace(/\s+/g, "_") || "candidate";
-  return chrome.downloads.download({
-    url: `${apiBase}/candidates/${Number(candidateId)}/resumes/${Number(resume.id)}`,
-    filename: `MedhuntResumes/${safeName}_resume.pdf`,
-    saveAs: false,
-  });
+  const blob = await fetchStoredResumeBlob(candidateId, resume.id);
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: blobUrl,
+      filename: `MedhuntResumes/${safeName}_resume.pdf`,
+      saveAs: false,
+    });
+    releaseResumeBlobUrlLater(blobUrl);
+    return downloadId;
+  } catch (error) {
+    URL.revokeObjectURL(blobUrl);
+    throw error;
+  }
 }
 
 async function recoverStoredResume(candidateId, uploadStartedAt, timeoutMs = 120000) {
@@ -3653,11 +3702,19 @@ async function openStoredResume(candidateId, resumeId) {
     throw new Error("Wait for the current resumes to finish saving.");
   }
   if (!candidateId || !resumeId) throw new Error("Stored resume was not found.");
-  const url = `${apiBase}/candidates/${candidateId}/resumes/${resumeId}`;
+  const blob = await fetchStoredResumeBlob(candidateId, resumeId);
+  const url = URL.createObjectURL(blob);
   if (IS_EXTENSION) {
-    await chrome.tabs.create({ url });
+    try {
+      await chrome.tabs.create({ url });
+      releaseResumeBlobUrlLater(url);
+    } catch (error) {
+      URL.revokeObjectURL(url);
+      throw error;
+    }
   } else {
     window.open(url, "_blank", "noopener");
+    releaseResumeBlobUrlLater(url);
   }
 }
 

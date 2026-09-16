@@ -3725,7 +3725,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.25.12"
+    assert manifest["version"] == "3.25.13"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -3794,6 +3794,10 @@ def test_frontend_is_manifest_v3_compatible():
     assert "hasCompleteIndeedContact" in app_script
     assert "timeout: 300000" in app_script
     assert "recoverStoredResume" in app_script
+    assert "fetchStoredResumeBlob" in app_script
+    assert "headers: authenticatedApiHeaders()" in app_script
+    assert "url: blobUrl" in app_script
+    assert "X-HealthBoard-Extension-Token" in app_script
     assert "RADIXSOL_PLATFORM_RESULTS_CHANGED" in content_script
     assert "Source Profiles" in index
     assert 'data-qa="Candidate Card"' in platform_script
