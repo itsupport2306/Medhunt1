@@ -6,6 +6,7 @@ No enrichment provider or network service is contacted.
 from __future__ import annotations
 
 import re
+import argparse
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
@@ -26,8 +27,54 @@ def _load_panel(page: Page) -> None:
         ".includes(location.protocol);"
     )
     assert extension_check in source
+    if 'const DEFAULT_BACKEND = "https://medhunt1.onrender.com";' in source:
+        # Packaged UI geometry tests model a valid persisted sign-in. The
+        # separate hosted-auth test below deliberately starts without one.
+        page.evaluate(
+            """() => { window.__panelTest.local.medhuntHealthBoardSession = {
+              extension_token: 'smoke-test-token', user: { name: 'Test Recruiter' }
+            }; }"""
+        )
     page.add_script_tag(content=source.replace(extension_check, "const IS_EXTENSION = true;", 1))
     page.wait_for_selector(".capture-row")
+
+
+def _run_hosted_auth_gate(browser_type, executable: Path) -> dict:
+    """A hosted extension must keep login open and pause profile scanning."""
+    browser = browser_type.launch(headless=True, executable_path=str(executable))
+    page = browser.new_page(viewport={"width": 420, "height": 760})
+    index = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    index = re.sub(r"\s*<script\s+src=[^>]+></script>", "", index, flags=re.I)
+    page.set_content(index)
+    page.add_style_tag(path=str(FRONTEND / "styles.css"))
+    page.evaluate(MOCK_SCRIPT)
+    page.add_script_tag(path=str(FRONTEND / "profile-quality.js"))
+
+    source = (FRONTEND / "app.js").read_text(encoding="utf-8")
+    extension_check = (
+        'const IS_EXTENSION = ["chrome-extension:", "moz-extension:"]'
+        ".includes(location.protocol);"
+    )
+    local_backend = 'const DEFAULT_BACKEND = "http://127.0.0.1:8091";'
+    hosted_backend = 'const DEFAULT_BACKEND = "https://medhunt1.onrender.com";'
+    assert extension_check in source
+    source = source.replace(extension_check, "const IS_EXTENSION = true;", 1)
+    if local_backend in source:
+        assert source.count(local_backend) == 1
+        source = source.replace(local_backend, hosted_backend, 1)
+    else:
+        assert source.count(hosted_backend) == 1
+    page.add_script_tag(content=source)
+    page.wait_for_selector("#medhuntLoginEmail")
+    page.wait_for_timeout(150)
+
+    assert page.locator("#medhuntLoginEmail").is_visible()
+    state = page.evaluate("() => window.__panelTest")
+    assert "/auth/config" in state["fetchPaths"]
+    assert "/health" not in state["fetchPaths"], state["fetchPaths"]
+    assert state["scanCalls"] == {}, state["scanCalls"]
+    browser.close()
+    return {"login_visible": True, "health_checks_before_login": 0, "scans_before_login": 0}
 
 
 def _seed_profiles(page: Page, count: int = 50) -> None:
@@ -59,7 +106,6 @@ def _seed_profiles(page: Page, count: int = 50) -> None:
           indeedLookupScope = new Set();
           indeedLookupSummary = null;
           indeedResultFilter = 'all';
-          indeedCandidateQuery = '';
           indeedSelected = new Set(profiles.map(profile => profile._selectionKey));
           skippedProfileCount = 2;
           indeedScanState = { phase: 'captured', found: count, total: count };
@@ -160,8 +206,10 @@ def _layout(page: Page) -> dict:
           const header = document.querySelector('[data-testid="source-header"]');
           const dock = document.querySelector('[data-testid="action-dock"]');
           const row = document.querySelector('.capture-row:not([hidden])');
+          const primary = row?.querySelector('.capture-row-primary');
           const avatar = row?.querySelector('.capture-avatar');
           const checkboxControl = row?.querySelector('.candidate-select-control');
+          const identity = row?.querySelector('.capture-identity');
           const interactive = [...document.querySelectorAll('button:not([hidden]), input:not([hidden])')]
             .filter(element => {
               const style = getComputedStyle(element);
@@ -177,9 +225,15 @@ def _layout(page: Page) -> dict:
             headerBackground: header ? getComputedStyle(header).backgroundImage : '',
             headerBackgroundColor: header ? getComputedStyle(header).backgroundColor : '',
             dockVisible: Boolean(dock && dock.getBoundingClientRect().height),
+            rowDisplay: row ? getComputedStyle(row).display : '',
+            rowBorderStyle: row ? getComputedStyle(row).borderStyle : '',
             rowRadius: row ? getComputedStyle(row).borderRadius : '',
+            primaryDisplay: primary ? getComputedStyle(primary).display : '',
             avatarRadius: avatar ? getComputedStyle(avatar).borderRadius : '',
             checkboxTargetHeight: checkboxControl?.getBoundingClientRect().height || 0,
+            primaryItemsAligned: Boolean(primary && avatar && checkboxControl && identity) &&
+              Math.abs(avatar.getBoundingClientRect().top - checkboxControl.getBoundingClientRect().top) < 1 &&
+              Math.abs(avatar.getBoundingClientRect().top - identity.getBoundingClientRect().top) < 1,
             tooNarrowControls: interactive.filter(element => {
               if (element.closest('.result-summary')) return false;
               const rect = element.getBoundingClientRect();
@@ -206,12 +260,20 @@ def _run_browser(browser_type, executable: Path) -> dict:
     assert page.locator(".medhunt-mark").evaluate("el => getComputedStyle(el).borderRadius") != "50%"
     _assert_inactive_header_progress(page)
 
-    # Filtering must hide non-matches even though cards use CSS Grid.
-    search = page.locator("#candidateSearch")
-    search.fill("Candidate 49")
-    assert page.locator(".capture-row:visible").count() == 1
-    search.press("Escape")
-    assert page.locator(".capture-row:visible").count() == 50
+    # Health can resolve after the profile queue has rendered. Updating the
+    # connection state must refresh the visible header instead of leaving a
+    # stale "Service offline" label behind.
+    page.evaluate("() => { backendHealth = null; updateSourceHeaderServiceStatus(); }")
+    assert page.locator("#sourceHeaderStatus").inner_text() == "Service offline"
+    page.evaluate(
+        "() => { backendHealth = { status: 'ok' }; updateSourceHeaderServiceStatus(); }"
+    )
+    assert page.locator("#sourceHeaderStatus").inner_text() == "Ready to find contacts"
+
+    # The profile queue stays visually consistent with the compact reference
+    # workflow; filtering belongs in the source site rather than above cards.
+    assert page.locator("#candidateSearch").count() == 0
+    assert page.locator("#candidateFilterEmpty").count() == 0
 
     captured_layouts = {}
     for width, height in ((320, 700), (420, 760), (600, 900)):
@@ -222,6 +284,10 @@ def _run_browser(browser_type, executable: Path) -> dict:
         assert layout["bodyScrollWidth"] <= width + 1, layout
         assert layout["tooNarrowControls"] == 0, layout
         assert layout["dockVisible"], layout
+        assert layout["rowDisplay"] == "flex", layout
+        assert layout["rowBorderStyle"] == "solid", layout
+        assert layout["primaryDisplay"] == "grid", layout
+        assert layout["primaryItemsAligned"], layout
         assert layout["checkboxTargetHeight"] >= 44, layout
         # The restrained shell uses one solid brand color; decorative gradients
         # and glow effects should not compete with workflow progress.
@@ -232,7 +298,7 @@ def _run_browser(browser_type, executable: Path) -> dict:
         columns = page.locator(".capture-row").nth(1).evaluate(
             "el => Math.round(el.getBoundingClientRect().top) === Math.round(document.querySelector('.capture-row').getBoundingClientRect().top)"
         )
-        assert columns == (width >= 520), (width, columns)
+        assert columns is False, (width, columns)
         page.locator("#indeedCandidateList").evaluate("el => { el.scrollTop = el.scrollHeight; }")
         page.wait_for_timeout(30)
         last_visible = page.locator(".capture-row").last.evaluate(
@@ -363,12 +429,20 @@ def _run_browser(browser_type, executable: Path) -> dict:
 
 
 def main() -> None:
+    global FRONTEND
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--frontend", type=Path, default=FRONTEND)
+    args = parser.parse_args()
+    FRONTEND = args.frontend.resolve()
     available = [(name, path) for name, path in BROWSERS if path.exists()]
     assert available, "Chrome or Edge is required for the workbench UI smoke test."
     output = {}
     with sync_playwright() as playwright:
         for name, executable in available:
-            output[name] = _run_browser(playwright.chromium, executable)
+            output[name] = {
+                "workbench": _run_browser(playwright.chromium, executable),
+                "hosted_auth_gate": _run_hosted_auth_gate(playwright.chromium, executable),
+            }
     print({"frontend_workbench": "passed", "browsers": output})
 
 

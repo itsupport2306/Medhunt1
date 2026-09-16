@@ -1,8 +1,8 @@
 "use strict";
 
-// Platform-independent guard for profiles returned by content scripts. Site
-// adapters read the DOM; this layer prevents obvious navigation labels,
-// malformed source URLs, stale cards, and duplicates from reaching storage.
+
+
+
 (() => {
   const MAX_PROFILES = 100;
   const CREDENTIALS = new Set([
@@ -239,10 +239,10 @@
       roles: textList(raw.roles),
       employers: textList(raw.employers),
       schools: textList(raw.schools),
-      // Preserve source-declared specialties independently from generic
-      // skills/roles. Healthcare and staffing adapters can expose either a
-      // scalar `specialty` or bounded specialty arrays; keeping both here
-      // lets the import contract carry them to the recruiting system for exact resolution.
+
+
+
+
       specialty: cleanText(raw.specialty, 240),
       specialties: textList([
         ...(Array.isArray(raw.specialties) ? raw.specialties : []),
@@ -307,7 +307,7 @@
     return { profiles: [...profiles.values()], skipped, skippedCount };
   }
 
-  globalThis.RadixsolProfileQuality = Object.freeze({
+  globalThis.MedhuntProfileQuality = Object.freeze({
     cleanText,
     normalizeName,
     likelyPersonName,

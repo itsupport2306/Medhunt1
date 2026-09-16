@@ -52,6 +52,8 @@ def main():
         syntax = context.new_page()
         source = (FRONTEND / "healthcare-directory-content.js").read_text(encoding="utf-8")
         assert syntax.evaluate("source => { new Function(source); return true; }", source)
+        app_source = (FRONTEND / "app.js").read_text(encoding="utf-8")
+        assert syntax.evaluate("source => { new Function(source); return true; }", app_source)
         syntax.close()
 
         npino = context.new_page()
@@ -70,7 +72,7 @@ def main():
         npino.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
         npino_result = _message(npino, {"type": "RADIXSOL_LIST_PLATFORM_CANDIDATES"})
         assert npino_result["platform"] == "npino", npino_result
-        assert npino_result["adapter_revision"] == "healthcare-directory-v3"
+        assert npino_result["adapter_revision"] == "healthcare-directory-v9"
         assert npino_result["count"] == 1, npino_result
         assert npino_result["profiles"][0]["name"] == "Patrick Theodore Gomella"
         assert npino_result["profiles"][0]["source_id"] == "1093058315"
@@ -238,6 +240,310 @@ def main():
         assert document_profile["years_experience"] == "18+"
         assert document_profile["npi"] == "1689794356"
 
+        medifind = context.new_page()
+        medifind.goto("https://www.medifind.com/specialty/thoracic-surgery")
+        medifind.set_content(
+            """<main><h1>Best Thoracic Surgeons Near Me</h1>
+              <script type="application/ld+json">{
+                "@context":"https://schema.org", "@type":"Physician",
+                "name":"Brian E. Louie",
+                "description":"Dr. Louie treats chest conditions. Dr. Louie is board certified in American Board Of Surgery.",
+                "url":"https://www.medifind.com/doctors/brian-e-louie/10650877",
+                "address":{"@type":"PostalAddress","addressLocality":"Seattle","addressRegion":"WA","postalCode":"98104","streetAddress":"1101 Madison Street, Suite 900","addressCountry":"US"},
+                "medicalSpecialty":{"@type":"MedicalSpecialty","name":"Thoracic Surgery"},
+                "telephone":"206-215-6800",
+                "hospitalAffiliation":{"@type":"Hospital","name":"Swedish Medical Center"}
+              }</script>
+              <div id="card_doctor_10650877">
+                <a data-link-type="doctor-name" href="/doctors/brian-e-louie/10650877"><h3>Dr. Brian E. Louie</h3></a>
+                <div class="DoctorCard_header__specialties__fixture">Thoracic Surgery</div>
+                <h4 class="DoctorCard_body__alt-container__affiliation__fixture">Swedish Thoracic Surgery - First Hill</h4>
+                <div class="CardAddress_card-address__content__fixture">1101 Madison Street, Suite 900, Seattle, WA</div>
+              </div>
+            </main>"""
+        )
+        _install_runtime(medifind)
+        medifind.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
+        medifind_result = _message(medifind, {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"})
+        assert medifind_result["platform"] == "medifind", medifind_result
+        assert medifind_result["platform_label"] == "MediFind"
+        assert medifind_result["adapter_revision"] == "healthcare-directory-v9"
+        assert medifind_result["count"] == 1, medifind_result
+        medifind_profile = medifind_result["profiles"][0]
+        assert medifind_profile["name"] == "Brian E. Louie"
+        assert medifind_profile["source_id"] == "10650877"
+        assert medifind_profile["location"] == "Seattle, WA"
+        assert medifind_profile["specialties"] == ["Thoracic Surgery"]
+        assert "Swedish Medical Center" in medifind_profile["employers"]
+        assert "206-215-6800" not in medifind_profile["notes"]
+        assert medifind_profile["profile_document"]["source_label"] == "MediFind"
+        assert medifind_profile["profile_document"]["certifications"] == [
+            "Board certified in American Board Of Surgery"
+        ]
+
+        actual_medifind_profile_count = 0
+        medifind_profile_snapshot = FRONTEND.parents[1] / "medifind_profile.txt"
+        if medifind_profile_snapshot.is_file():
+            actual_medifind_profile = context.new_page()
+            actual_medifind_profile.goto(
+                "https://www.medifind.com/doctors/brian-e-louie/10650877"
+            )
+            actual_medifind_profile.set_content(
+                medifind_profile_snapshot.read_text(encoding="utf-8")
+            )
+            _install_runtime(actual_medifind_profile)
+            actual_medifind_profile.add_script_tag(
+                path=str(FRONTEND / "healthcare-directory-content.js")
+            )
+            actual_medifind_result = _message(
+                actual_medifind_profile,
+                {"type": "RADIXSOL_CAPTURE_PLATFORM_PROFILE"},
+            )
+            assert actual_medifind_result["ok"] is True, actual_medifind_result
+            actual_profile = actual_medifind_result["profile"]
+            assert actual_profile["name"] == "Brian E. Louie", actual_profile
+            assert actual_profile["source_id"] == "10650877", actual_profile
+            assert actual_profile["specialties"] == ["Thoracic Surgery"], actual_profile
+            assert "Surgery in WA" in actual_profile["licenses"], actual_profile
+            assert "American Board Of Surgery" in actual_profile["certifications"], actual_profile
+            assert any("University Of Toronto" in value for value in actual_profile["schools"])
+            assert "Swedish Medical Center" in actual_profile["employers"], actual_profile
+            assert actual_profile["profile_document"]["languages"] == ["English"]
+            actual_medifind_profile_count = 1
+            actual_medifind_profile.close()
+
+        commonspirit = context.new_page()
+        commonspirit.goto("https://providers.commonspirit.org/search?search=primary-care")
+        commonspirit.set_content(
+            """<main><div id="results-list">
+              <div id="card-39c1d894-7371-48b5-97b1-a993c3781986" class="csh-aem-result-card csh-aem-result-card--provider">
+                <a class="csh-aem-result-card__link" href="/find-a-doctor/clara-zee-1407550627?searchType=taxonomies&amp;slug=primary-care"><h3 class="csh-aem-result-card__title">Clara Zee, DO</h3></a>
+                <ul class="csh-aem-result-card__specialties"><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--primary">Baylor St. Luke's Medical Group</li></ul>
+                <ul class="csh-aem-result-card__specialties"><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--secondary">Family Medicine</li><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--secondary">Primary Care</li></ul>
+                <div class="csh-aem-result-card__line csh-aem-result-card__line--address"><span>6769 Lake Woodlands Drive, Suite E, The Woodlands, TX 77382</span></div>
+                <a href="tel:281-555-0100">281-555-0100</a>
+              </div>
+              <div id="card-renee-sayer" class="csh-aem-result-card csh-aem-result-card--provider">
+                <a class="csh-aem-result-card__link" href="/find-a-doctor/renee-sayer-1234567890"><h3 class="csh-aem-result-card__title">Renee Sayer, APRN-C, DNP, FNP-C, PMHNP-C</h3></a>
+                <ul class="csh-aem-result-card__specialties"><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--primary">CHI Health Clinic</li></ul>
+                <ul class="csh-aem-result-card__specialties"><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--secondary">Family Medicine</li><li class="csh-aem-result-card__specialties__item csh-aem-result-card__specialties__item--secondary">Primary Care</li></ul>
+                <div class="csh-aem-result-card__line csh-aem-result-card__line--address"><span>1721 Colfax St, Schuyler, NE 68661</span></div>
+              </div>
+            </div></main>"""
+        )
+        _install_runtime(commonspirit)
+        commonspirit.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
+        commonspirit_result = _message(commonspirit, {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"})
+        assert commonspirit_result["platform"] == "commonspirit", commonspirit_result
+        assert commonspirit_result["platform_label"] == "CommonSpirit Health"
+        assert commonspirit_result["adapter_revision"] == "healthcare-directory-v9"
+        assert commonspirit_result["count"] == 2, commonspirit_result
+        commonspirit_profile = next(
+            profile for profile in commonspirit_result["profiles"]
+            if profile["source_id"] == "1407550627"
+        )
+        assert commonspirit_profile["name"] == "Clara Zee"
+        assert commonspirit_profile["source_id"] == "1407550627"
+        assert commonspirit_profile["location"] == "The Woodlands, TX"
+        assert commonspirit_profile["specialties"] == ["Family Medicine", "Primary Care"]
+        assert "Baylor St. Luke's Medical Group" in commonspirit_profile["employers"]
+        assert "281-555-0100" not in commonspirit_profile["notes"]
+        assert commonspirit_profile["profile_document"]["source_label"] == "CommonSpirit Health"
+        renee_profile = next(
+            profile for profile in commonspirit_result["profiles"]
+            if profile["source_id"] == "1234567890"
+        )
+        assert renee_profile["name"] == "Renee Sayer"
+        assert renee_profile["roles"] == ["Nurse Practitioner"]
+        assert renee_profile["credentials"] == ["APRN-C", "DNP", "FNP-C", "PMHNP-C"]
+        assert renee_profile["specialties"] == ["Family Medicine", "Primary Care"]
+        assert "CHI Health Clinic" in renee_profile["employers"]
+
+        actual_commonspirit_count = 0
+        actual_snapshot = FRONTEND.parents[1] / "Commonspirit.txt"
+        if actual_snapshot.is_file():
+            actual_commonspirit = context.new_page()
+            actual_commonspirit.goto(
+                "https://providers.commonspirit.org/search?search=primary-care"
+            )
+            actual_commonspirit.set_content(actual_snapshot.read_text(encoding="utf-8"))
+            _install_runtime(actual_commonspirit)
+            actual_commonspirit.add_script_tag(
+                path=str(FRONTEND / "healthcare-directory-content.js")
+            )
+            actual_result = _message(
+                actual_commonspirit,
+                {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"},
+            )
+            assert actual_result["platform"] == "commonspirit", actual_result
+            assert actual_result["count"] >= 1, actual_result
+            actual_commonspirit_count = actual_result["count"]
+            actual_commonspirit.close()
+
+        actual_commonspirit_profile_count = 0
+        commonspirit_profile_snapshot = FRONTEND.parents[1] / "Commonspirit_profilr.txt"
+        if commonspirit_profile_snapshot.is_file():
+            actual_commonspirit_profile = context.new_page()
+            actual_commonspirit_profile.goto(
+                "https://www.commonspirit.org/find-a-doctor/soheila-hedayati-1265667067"
+            )
+            actual_commonspirit_profile.set_content(
+                commonspirit_profile_snapshot.read_text(encoding="utf-8")
+            )
+            _install_runtime(actual_commonspirit_profile)
+            actual_commonspirit_profile.add_script_tag(
+                path=str(FRONTEND / "healthcare-directory-content.js")
+            )
+            actual_commonspirit_result = _message(
+                actual_commonspirit_profile,
+                {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"},
+            )
+            assert actual_commonspirit_result["ok"] is True, actual_commonspirit_result
+            assert actual_commonspirit_result["count"] == 1, actual_commonspirit_result
+            actual_profile = actual_commonspirit_result["profiles"][0]
+            assert actual_profile["name"] == "Soheila Hedayati", actual_profile
+            assert actual_profile["source_id"] == "1265667067", actual_profile
+            assert actual_profile["credentials"] == ["MD"], actual_profile
+            assert actual_profile["specialties"] == ["Internal Medicine"], actual_profile
+            assert actual_profile["location"] == "Seattle, WA", actual_profile
+            assert "board-certified" in actual_profile["profile_document"]["summary"]
+            actual_commonspirit_profile_count = 1
+            actual_commonspirit_profile.close()
+
+        commonspirit_full_profile = context.new_page()
+        commonspirit_full_profile.goto(
+            "https://www.commonspirit.org/find-a-doctor/soheila-hedayati-1265667067"
+        )
+        commonspirit_full_profile.set_content(
+            """<html><head><link rel="canonical" href="https://www.commonspirit.org/find-a-doctor/soheila-hedayati-1265667067"></head><body><main>
+              <h1 class="csh-aem-provider-hero__title">Soheila Hedayati, MD</h1>
+              <div class="csh-aem-provider-hero__org-unit">Virginia Mason Medical Center</div>
+              <div class="csh-aem-provider-hero__address">1100 Ninth Avenue, Seattle, WA 98101</div>
+              <section id="about"><div class="csh-aem-show-more-content-block__content">Full public professional biography.</div></section>
+              <section id="specialties"><div class="csh-aem-provider-details__list-item">Internal Medicine</div><div class="csh-aem-provider-details__list-item">Primary Care</div></section>
+              <section id="credentials"><div class="csh-aem-provider-details__list-item">American Board of Internal Medicine</div><div class="csh-aem-provider-details__list-item">American Board of Geriatric Medicine</div></section>
+              <section id="education"><div class="csh-aem-provider-details__list-item"><strong>Medical School:</strong> University of Vienna, Austria, 1998</div><div class="csh-aem-provider-details__list-item"><strong>Residency:</strong> Lutheran Medical Center, 2008</div></section>
+              <section id="medical_groups"><div class="csh-aem-medical-groups__list-item">Virginia Mason Medical Center</div><div class="csh-aem-medical-groups__list-item">Rainier Health Network</div></section>
+              <section id="languages"><div class="csh-aem-provider-details__list-item">English</div><div class="csh-aem-provider-details__list-item">German</div></section>
+              <script type="application/ld+json">{
+                "@type":"Physician", "name":"Soheila Hedayati, MD",
+                "url":"https://www.commonspirit.org/find-a-doctor/soheila-hedayati-1265667067",
+                "medicalSpecialty":{"name":["Internal Medicine","Primary Care"]},
+                "hospitalAffiliation":[{"name":"Virginia Mason Medical Center"}],
+                "knowsLanguage":[{"name":"English"},{"name":"German"}],
+                "telephone":"206-555-0100"
+              }</script>
+            </main></body></html>"""
+        )
+        _install_runtime(commonspirit_full_profile)
+        commonspirit_full_profile.add_script_tag(
+            path=str(FRONTEND / "healthcare-directory-content.js")
+        )
+        commonspirit_full_result = _message(
+            commonspirit_full_profile,
+            {"type": "RADIXSOL_CAPTURE_PLATFORM_PROFILE"},
+        )
+        assert commonspirit_full_result["ok"] is True, commonspirit_full_result
+        full_document = commonspirit_full_result["profile"]["profile_document"]
+        assert full_document["specialties"] == ["Internal Medicine", "Primary Care"]
+        assert "Rainier Health Network" in full_document["hospitals"]
+        assert any("University of Vienna" in value for value in full_document["education"])
+        assert full_document["certifications"] == [
+            "American Board of Internal Medicine",
+            "American Board of Geriatric Medicine",
+        ]
+        assert full_document["languages"] == ["English", "German"]
+        assert "206-555-0100" not in commonspirit_full_result["profile"]["notes"]
+        commonspirit_full_profile.close()
+
+        sharecare = context.new_page()
+        sharecare.goto("https://providers.sharecare.com/find-a-doctor/specialty/cardiothoracic-surgery")
+        sharecare.set_content(
+            """<html><head><link rel="canonical" href="https://providers.sharecare.com/find-a-doctor/specialty/cardiothoracic-surgery"></head><body><main>
+              <div data-qa-target="qa-southpaw-search">Cardiothoracic Surgery</div>
+              <article class="ProviderCardAlternative" data-pwid="YJNDQ" data-npi="1306821244" data-href="/doctor/dr-raja-flores">
+                <a class="ProviderCardAlternative-header" href="/doctor/dr-raja-flores">
+                  <h3 class="ProviderCardAlternative-title">Dr. Raja Flores, MD</h3>
+                  <div class="ProviderCardAlternative-meta"><span>Cardiothoracic Surgery</span></div>
+                </a>
+                <div class="ProviderCardAlternative-location-button-content"><a href="https://www.google.com/maps/dir/?api=1">1470 Madison Ave # 3333 New York, NY 10029</a></div>
+                <a href="tel:(212) 257-0031">(212) 257-0031</a>
+              </article>
+              <script type="application/ld+json">{"@context":"https://schema.org","@type":"SearchResultsPage","provider":[{"@type":"Physician","name":"Dr. Raja Flores, MD","url":"https://providers.sharecare.com/doctor/dr-raja-flores","medicalSpecialty":{"@type":"MedicalSpecialty","name":"Cardiothoracic Surgery"},"address":{"@type":"PostalAddress","streetAddress":"1470 Madison Ave # 3333","addressLocality":"New York","addressRegion":"NY","postalCode":"10029"},"hospitalAffiliation":{"@type":"Hospital","name":"Mount Sinai Morningside"}}]}</script>
+            </main></body></html>"""
+        )
+        _install_runtime(sharecare)
+        sharecare.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
+        sharecare_result = _message(sharecare, {"type": "RADIXSOL_LIST_PLATFORM_CANDIDATES"})
+        assert sharecare_result["platform"] == "sharecare", sharecare_result
+        assert sharecare_result["platform_label"] == "Sharecare"
+        assert sharecare_result["adapter_revision"] == "healthcare-directory-v9"
+        assert sharecare_result["count"] == 1, sharecare_result
+        sharecare_candidate = sharecare_result["profiles"][0]
+        assert sharecare_candidate["name"] == "Raja Flores"
+        assert sharecare_candidate["source_id"] == "1306821244"
+        assert sharecare_candidate["location"] == "New York, NY"
+        assert sharecare_candidate["specialties"] == ["Cardiothoracic Surgery"]
+        assert sharecare_candidate["employers"] == ["Mount Sinai Morningside"]
+        assert "212) 257-0031" not in sharecare_candidate["notes"]
+        sharecare.close()
+
+        sharecare_profile = context.new_page()
+        sharecare_profile.goto("https://providers.sharecare.com/doctor/dr-raja-flores")
+        sharecare_profile.set_content(
+            """<html><head><link rel="canonical" href="https://providers.sharecare.com/doctor/dr-raja-flores"></head><body><main>
+              <h1>Dr. Raja Flores, MD</h1>
+              <h2>Specialties</h2><ul><li>Cardiothoracic Surgery</li></ul>
+              <h2>Education &amp; Training</h2><ul><li>Albert Einstein College of Medicine</li></ul>
+              <h2>Board Certifications</h2><ul><li>American Board of Thoracic Surgery</li></ul>
+              <h2>Licenses</h2><ul><li>New York State Medical License</li></ul>
+              <script type="application/ld+json">{"@context":"https://schema.org","@type":"Physician","name":"Dr. Raja Flores, MD","url":"https://providers.sharecare.com/doctor/dr-raja-flores","description":"Public professional overview for Dr. Flores.","medicalSpecialty":{"@type":"MedicalSpecialty","name":"Cardiothoracic Surgery"},"hospitalAffiliation":{"@type":"Hospital","name":"Mount Sinai Morningside"},"alumni":{"@type":"CollegeOrUniversity","name":"Albert Einstein College of Medicine"},"hasCredential":{"@type":"EducationalOccupationalCredential","name":"American Board of Thoracic Surgery"},"address":{"@type":"PostalAddress","addressLocality":"New York","addressRegion":"NY"},"identifier":"1306821244"}</script>
+            </main></body></html>"""
+        )
+        _install_runtime(sharecare_profile)
+        sharecare_profile.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
+        sharecare_capture = _message(sharecare_profile, {
+            "type": "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
+            "original_type": "RADIXSOL_CAPTURE_PLATFORM_PROFILE",
+        })
+        assert sharecare_capture["ok"] is True, sharecare_capture
+        assert sharecare_capture["platform"] == "sharecare"
+        assert sharecare_capture["profile"]["source_id"] == "1306821244"
+        sharecare_document = sharecare_capture["profile"]["profile_document"]
+        assert sharecare_document["source_label"] == "Sharecare"
+        assert sharecare_document["specialties"] == ["Cardiothoracic Surgery"]
+        assert sharecare_document["hospitals"] == ["Mount Sinai Morningside"]
+        assert sharecare_document["education"] == ["Albert Einstein College of Medicine"]
+        assert sharecare_document["certifications"] == ["American Board of Thoracic Surgery"]
+        assert sharecare_document["licenses"] == ["New York State Medical License"]
+        sharecare_profile.close()
+
+        actual_sharecare_count = 0
+        sharecare_snapshot = FRONTEND.parents[1] / "Sharecare.txt"
+        if sharecare_snapshot.is_file():
+            actual_sharecare = context.new_page()
+            actual_sharecare.goto(
+                "https://providers.sharecare.com/find-a-doctor/specialty/cardiothoracic-surgery"
+            )
+            actual_sharecare.set_content(sharecare_snapshot.read_text(encoding="utf-8"))
+            _install_runtime(actual_sharecare)
+            actual_sharecare.add_script_tag(
+                path=str(FRONTEND / "healthcare-directory-content.js")
+            )
+            actual_sharecare_result = _message(
+                actual_sharecare,
+                {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"},
+            )
+            assert actual_sharecare_result["platform"] == "sharecare", actual_sharecare_result
+            assert actual_sharecare_result["count"] > 0, actual_sharecare_result
+            assert all(
+                candidate["source"] == "sharecare"
+                and candidate["source_url"].startswith("https://providers.sharecare.com/doctor/")
+                for candidate in actual_sharecare_result["profiles"]
+            )
+            actual_sharecare_count = actual_sharecare_result["count"]
+            actual_sharecare.close()
+
         browser.close()
         print({
             "npino": npino_result["count"],
@@ -245,6 +551,14 @@ def main():
             "nysed": nysed_result["count"],
             "usnews": usnews_result["count"],
             "usnews_profile": 1,
+            "medifind": medifind_result["count"],
+            "medifind_profile": actual_medifind_profile_count,
+            "commonspirit": commonspirit_result["count"],
+            "commonspirit_snapshot": actual_commonspirit_count,
+            "commonspirit_profile": actual_commonspirit_profile_count,
+            "sharecare": sharecare_result["count"],
+            "sharecare_profile": 1,
+            "sharecare_snapshot": actual_sharecare_count,
         })
 
 

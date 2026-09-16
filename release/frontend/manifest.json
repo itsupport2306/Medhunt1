@@ -19,8 +19,6 @@
     "scripting"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*",
     "*://*.indeed.com/*",
     "*://*.vivian.com/*",
     "*://*.ziprecruiter.com/*",
@@ -39,7 +37,8 @@
     "*://commonspirit.org/*",
     "*://*.commonspirit.org/*",
     "https://providers.sharecare.com/find-a-doctor/*",
-    "https://providers.sharecare.com/doctor/*"
+    "https://providers.sharecare.com/doctor/*",
+    "https://medhunt1.onrender.com/*"
   ],
   "background": {
     "service_worker": "background.js"

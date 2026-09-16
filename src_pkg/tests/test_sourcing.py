@@ -3257,7 +3257,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.23.0"
+            assert health_body["version"] == "3.25.4"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3440,6 +3440,35 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             assert batch.json()["existing"] == 1
             assert batch.json()["database"] == "sqlite"
 
+            directory_batch = await client.post("/candidates/import/batch", json={
+                "profiles": [
+                    {
+                        "name": "Clara Zee", "location": "The Woodlands, TX",
+                        "headline": "Family Medicine", "roles": ["Physician"],
+                        "specialties": ["Family Medicine", "Primary Care"],
+                        "source": "commonspirit",
+                        "source_url": "https://www.commonspirit.org/find-a-doctor/clara-zee-1407550627",
+                        "source_id": "1407550627",
+                    },
+                    {
+                        "name": "Raja Flores", "location": "New York, NY",
+                        "headline": "Cardiothoracic Surgery", "roles": ["Physician"],
+                        "specialties": ["Cardiothoracic Surgery"],
+                        "source": "sharecare",
+                        "source_url": "https://providers.sharecare.com/doctor/dr-raja-flores",
+                        "source_id": "1306821244",
+                    },
+                ],
+                "search_url": "https://providers.sharecare.com/find-a-doctor/specialty/cardiothoracic-surgery",
+            })
+            assert directory_batch.status_code == 200, directory_batch.text
+            directory_profiles = directory_batch.json()["results"]
+            assert directory_batch.json()["saved"] == 2
+            assert [store.get_candidate(item["id"])["source"] for item in directory_profiles] == [
+                "commonspirit", "sharecare",
+            ]
+            assert "Specialty: Cardiothoracic Surgery" in directory_profiles[1]["candidate"]["notes"]
+
             preflight = await client.options("/health", headers={
                 "Origin": f"chrome-extension://{'a' * 32}",
                 "Access-Control-Request-Method": "GET",
@@ -3517,6 +3546,97 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
             assert duplicate.json()["resume"]["id"] == resume_id
             assert duplicate.json()["resume"]["deduplicated"] is True
             assert len(store.list_resumes(candidate_id)) == 1
+
+            medifind_id = store.add_candidate(
+                "Brian E. Louie", "Seattle, WA", source="medifind",
+                source_url="https://www.medifind.com/doctors/brian-e-louie/10650877",
+                source_id="10650877",
+            )
+            medifind_body = {
+                **body,
+                "source_label": "MediFind",
+                "source_url": "https://www.medifind.com/doctors/brian-e-louie/10650877",
+                "headline": "Thoracic Surgery",
+                "summary": "Public MediFind professional overview.",
+                "specialties": ["Thoracic Surgery"],
+                "subspecialties": [],
+                "hospitals": ["Swedish Medical Center"],
+                "education": [],
+                "licenses": [],
+                "certifications": ["Board certified in American Board Of Surgery"],
+                "npi": "",
+                "address": "1101 Madison Street, Suite 900, Seattle, WA 98104",
+                "location": "Seattle, WA",
+            }
+            medifind_resume = await client.post(
+                f"/candidates/{medifind_id}/professional-profile-resume",
+                json=medifind_body,
+            )
+            assert medifind_resume.status_code == 200, medifind_resume.text
+            assert medifind_resume.json()["resume"]["filename"].endswith(".pdf")
+
+            commonspirit_id = store.add_candidate(
+                "Clara Zee", "The Woodlands, TX", source="commonspirit",
+                source_url="https://www.commonspirit.org/find-a-doctor/clara-zee-1407550627",
+                source_id="1407550627",
+            )
+            commonspirit_body = {
+                **medifind_body,
+                "source_label": "CommonSpirit Health",
+                "source_url": "https://www.commonspirit.org/find-a-doctor/clara-zee-1407550627",
+                "headline": "Family Medicine",
+                "summary": "Public CommonSpirit provider overview.",
+                "specialties": ["Family Medicine", "Primary Care"],
+                "hospitals": ["Baylor St. Luke's Medical Group"],
+                "npi": "1407550627",
+                "address": "6769 Lake Woodlands Drive, Suite E, The Woodlands, TX 77382",
+                "location": "The Woodlands, TX",
+            }
+            commonspirit_resume = await client.post(
+                f"/candidates/{commonspirit_id}/professional-profile-resume",
+                json=commonspirit_body,
+            )
+            assert commonspirit_resume.status_code == 200, commonspirit_resume.text
+            assert commonspirit_resume.json()["resume"]["filename"].endswith(".pdf")
+
+            sharecare_id = store.add_candidate(
+                "Raja Flores", "New York, NY", source="sharecare",
+                source_url="https://providers.sharecare.com/doctor/dr-raja-flores",
+                source_id="1306821244",
+            )
+            sharecare_body = {
+                **medifind_body,
+                "source_label": "Sharecare",
+                "source_url": "https://providers.sharecare.com/doctor/dr-raja-flores",
+                "headline": "Cardiothoracic Surgery",
+                "summary": "Public Sharecare professional overview.",
+                "specialties": ["Cardiothoracic Surgery"],
+                "hospitals": ["Mount Sinai Morningside"],
+                "education": ["Albert Einstein College of Medicine"],
+                "certifications": ["American Board of Thoracic Surgery"],
+                "licenses": ["New York State Medical License"],
+                "npi": "1306821244",
+                "address": "1470 Madison Ave, New York, NY 10029",
+                "location": "New York, NY",
+            }
+            sharecare_resume = await client.post(
+                f"/candidates/{sharecare_id}/professional-profile-resume",
+                json=sharecare_body,
+            )
+            assert sharecare_resume.status_code == 200, sharecare_resume.text
+            assert sharecare_resume.json()["resume"]["filename"].endswith(".pdf")
+
+            wrong_sharecare_url = await client.post(
+                f"/candidates/{sharecare_id}/professional-profile-resume",
+                json={**sharecare_body, "source_url": "https://sharecare.com/doctor/dr-raja-flores"},
+            )
+            assert wrong_sharecare_url.status_code == 400
+
+            wrong_medifind_url = await client.post(
+                f"/candidates/{medifind_id}/professional-profile-resume",
+                json={**medifind_body, "source_url": "https://example.com/doctors/wrong/1"},
+            )
+            assert wrong_medifind_url.status_code == 400
 
             wrong_source = store.add_candidate("Wrong Source", "", source="indeed")
             rejected = await client.post(
@@ -3605,7 +3725,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.23.0"
+    assert manifest["version"] == "3.25.12"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -3615,6 +3735,7 @@ def test_frontend_is_manifest_v3_compatible():
     assert "radixsol scout" not in app_script.casefold()
     assert 'const DEFAULT_BACKEND = "http://127.0.0.1:8091";' in app_script
     assert 'const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";' in app_script
+    assert 'if (DEFAULT_BACKEND.startsWith("https://"))' in app_script
     assert "DEFAULT_PORT = 8091" in launcher
     assert 'os.getenv("RADIXSOL_PORT", "8091")' in installer
     assert "--port 8091" in run_script
@@ -3630,6 +3751,10 @@ def test_frontend_is_manifest_v3_compatible():
     assert "*://npiprofile.com/*" in manifest["host_permissions"]
     assert "https://health.usnews.com/doctors/*" in manifest["host_permissions"]
     assert "https://health.usnews.com/nurse-practitioners/*" in manifest["host_permissions"]
+    assert "*://*.medifind.com/*" in manifest["host_permissions"]
+    assert "*://*.commonspirit.org/*" in manifest["host_permissions"]
+    assert "https://providers.sharecare.com/find-a-doctor/*" in manifest["host_permissions"]
+    assert "https://providers.sharecare.com/doctor/*" in manifest["host_permissions"]
     assert not any("usphonebook" in host.lower() for host in manifest["host_permissions"])
     assert "scripting" in manifest["permissions"]
     assert "downloads" in manifest["permissions"]
@@ -3649,7 +3774,9 @@ def test_frontend_is_manifest_v3_compatible():
     assert "XMLHttpRequest" in inject_script
     assert "response.clone().arrayBuffer()" in inject_script
     assert "medhuntProfileDataConsentV1" in app_script
-    assert "storage.session" in app_script
+    assert "chrome.storage.local.set({ [key]: value }" in app_script
+    assert "chrome.storage.sync" not in app_script
+    assert "[401, 403].includes(Number(error?.status))" in app_script
     assert "await saveDisplayedIndeedCandidates(result.page_url);" not in app_script
     assert (frontend / "privacy.html").is_file()
     assert "RADIXSOL_CAPTURE_INDEED_PROFILE" in content_script
@@ -3681,17 +3808,27 @@ def test_frontend_is_manifest_v3_compatible():
     assert "profile.php" in facebook_script
     assert "RADIXSOL_SCAN_PLATFORM_CANDIDATES" in facebook_script
     assert "RADIXSOL_SCAN_PLATFORM_CANDIDATES" in healthcare_directory_script
-    assert "healthcare-directory-v3" in healthcare_directory_script
+    assert "healthcare-directory-v9" in healthcare_directory_script
     assert "U.S. News Doctor Finder" in healthcare_directory_script
+    assert "MediFind" in healthcare_directory_script
+    assert "CommonSpirit Health" in healthcare_directory_script
+    assert "Sharecare" in healthcare_directory_script
     assert 'key: "usnews"' in app_script
+    assert 'key: "medifind"' in app_script
     assert "professional-profile-resume" in app_script
+    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare"])' in app_script
+    assert 'key: "sharecare"' in app_script
+    assert "captureProfessionalProfileInBackground" in app_script
+    assert "startProfessionalProfileResumeBatch" in app_script
+    assert "professionalProfileResumeQueue.push(profile)" in app_script
+    assert "sameProfessionalProfileUrl(activeSourcingPageUrl, professionalProfile.source_url)" in app_script
     assert "profile_document" in healthcare_directory_script
     assert 'return "usnews"' in background_script
     watcher_manifest = json.loads(
         (source_root / "watcher_frontend" / "manifest.json").read_text(encoding="utf-8")
     )
     assert not any(
-        any(host in permission for host in ("npino.com", "nysed.gov", "npiprofile.com", "usnews.com"))
+        any(host in permission for host in ("npino.com", "nysed.gov", "npiprofile.com", "usnews.com", "medifind.com", "commonspirit.org", "sharecare.com"))
         for permission in watcher_manifest["host_permissions"]
     )
     assert "RADIXSOL_ARM_LINKEDIN_PDF_CAPTURE" in background_script
@@ -3794,6 +3931,9 @@ def test_chrome_store_package_is_minimal_and_contains_no_private_provider_detail
             archive.read(name).decode("utf-8")
             for name in names if name.endswith(".js")
         ).casefold()
+        app_script = archive.read("app.js").decode("utf-8")
+        assert 'hasResults ? "" : " candidate-queue-card"' in app_script
+        assert 'indeedSelected.has(key) ? " selected" : ""' in app_script
         assert "radixsol" not in scripts
         assert not any(term in scripts for term in builder.FORBIDDEN_CLIENT_TERMS)
 
@@ -3909,7 +4049,7 @@ def test_installer_refreshes_baseline_and_preserves_non_storage_admin_override(m
     assert spec.loader is not None
     spec.loader.exec_module(installer)
 
-    assert installer.APP_VERSION == "3.23.0"
+    assert installer.APP_VERSION == "3.25.4"
     assert "medhunt" in installer.APP_NAME.casefold()
     assert "radixsol" not in installer.APP_NAME.casefold()
     assert "medhunt" in installer.RUN_VALUE.casefold()
@@ -4060,7 +4200,7 @@ def test_windows_version_resources_use_current_medhunt_branding():
     for resource in (setup_version, backend_version):
         assert "filevers=(3,22,15,0)" in resource
         assert "prodvers=(3,22,15,0)" in resource
-        assert "3.23.0" in resource
+        assert "3.25.4" in resource
         assert "Medhunt" in resource
         assert "Radixsol Sourcing Assistant" not in resource
 
@@ -4117,7 +4257,7 @@ def test_frontend_locks_captured_candidates_during_lookup():
     assert 'status: "looking_up"' in lookup_script
     assert "if (!hasCompleteIndeedContact(existing)" not in lookup_script
     assert lookup_script.index("renderIndeedProfiles();") < lookup_script.index(
-        "await saveDisplayedIndeedCandidates(activeSourcingPageUrl);"
+        "await saveDisplayedIndeedCandidates(activeSourcingPageUrl, profiles);"
     )
     assert "lookupTargets.push(profile);" in lookup_script
     assert "allowPageIdentity = false" in content_script

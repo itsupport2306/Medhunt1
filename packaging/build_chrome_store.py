@@ -13,9 +13,7 @@ import tempfile
 from urllib.parse import urlsplit
 import zipfile
 
-from rjsmin import jsmin
-
-from build_frontend import build as build_frontend
+from build_frontend import build as build_frontend, release_javascript
 
 
 FORBIDDEN_CLIENT_TERMS = (
@@ -99,7 +97,7 @@ def harden(stage: Path, api_base: str) -> None:
         source = path.read_text(encoding="utf-8")
         for old, new in BRAND_REPLACEMENTS:
             source = source.replace(old, new)
-        path.write_text(jsmin(source), encoding="utf-8", newline="\n")
+        path.write_text(release_javascript(source), encoding="utf-8", newline="\n")
 
 
 def audit(stage: Path, api_base: str) -> None:

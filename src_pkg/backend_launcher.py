@@ -197,7 +197,7 @@ def main() -> int:
             return 6
 
         pid_file.write_text(str(os.getpid()), encoding="utf-8")
-        logger.info("Starting Medhunt %s on 127.0.0.1:%s", "3.23.0", port)
+        logger.info("Starting Medhunt %s on 127.0.0.1:%s", "3.25.4", port)
         import uvicorn
         from api import app
 

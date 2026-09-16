@@ -3,7 +3,7 @@
 A Chrome/Edge side-panel extension backed by FastAPI and Neon/PostgreSQL. It scans
 candidate cards in authorized Indeed Smart Sourcing, Vivian Talent Pool,
 ZipRecruiter recruiter results, LinkedIn People results, public NPI No.,
-NPI Profile, and U.S. News Doctor Finder provider directories, and NYSED
+NPI Profile, U.S. News Doctor Finder, MediFind, and CommonSpirit Health provider directories, and NYSED
 license-verification results, plus
 individual LinkedIn `/in/` and Facebook profiles,
 automatically saves captured profiles, supports reviewed contact
@@ -41,7 +41,7 @@ approved team members and rotate its keys if a copy leaves that group.
 
 - Guided scan and display of up to 100 candidate or provider rows loaded in
   Indeed, Vivian, ZipRecruiter, LinkedIn People, NPI No., NPI Profile,
-  U.S. News Doctor Finder, or NYSED
+  U.S. News Doctor Finder, MediFind, CommonSpirit Health, or NYSED
   results, plus individual LinkedIn and Facebook profile capture
 - Scan progress, select-all/individual selection, and batched lookup progress
 - Whole-selection contact lookup through the People Data Labs bulk endpoint
@@ -142,7 +142,7 @@ The web interface is available at
 
 After updating the source, use **Reload** on the extensions page and reload the
 active Indeed, Vivian, ZipRecruiter, LinkedIn, Facebook, NPI No., NPI Profile,
-U.S. News Doctor Finder, or NYSED tab.
+U.S. News Doctor Finder, MediFind, CommonSpirit Health, or NYSED tab.
 The Facebook adapter also carries a revision handshake, so the v3.22.2 panel can
 replace an older parser in an already-open profile tab before it scans.
 
@@ -150,7 +150,8 @@ replace an older parser in an already-open profile tab before it scans.
 
 1. Open an authorized Indeed employer/Smart Sourcing, Vivian Talent Pool,
    ZipRecruiter recruiter account, LinkedIn account, Facebook account, NPI No.
-   directory, NPI Profile directory, U.S. News Doctor Finder search, or NYSED
+   directory, NPI Profile directory, U.S. News Doctor Finder search, MediFind
+   specialty search, CommonSpirit Health Find a Doctor, or NYSED
    verification search.
 2. Run a candidate search and wait for its result cards to load. LinkedIn
    supports both a People search-results page and one candidate's `/in/`
@@ -222,6 +223,17 @@ upsert automatically.
   retains the exact specialty, NPI, practice location, and hospital affiliation;
   it does not use source-listed phone numbers as verified enrichment contacts or
   advance pagination automatically.
+- **MediFind:** captures doctors from specialty-result pages and individual
+  doctor pages using embedded `Physician` structured data. Medhunt retains the
+  canonical profile identity, exact specialty, biography, practice location,
+  hospital affiliations, and visible board-certification statements. Public
+  appointment phone numbers are not treated as verified candidate contacts,
+  and pagination is not advanced automatically.
+- **CommonSpirit Health:** captures provider cards from Find a Doctor results and
+  individual provider pages using the canonical numeric provider/NPI URL. Medhunt
+  retains the displayed name, exact specialties, affiliated organization,
+  practice address, and provider page link. Clinic scheduling numbers are not
+  treated as verified personal contacts, and pagination is not advanced.
 - **NYSED:** captures visible individual license-verification results using the
   profession and license number as the stable source identity. Business-entity
   results are skipped, and Medhunt does not submit or broaden searches.
@@ -647,7 +659,7 @@ fixture are available in `tests/browser_smoke.py` and `tests/fixtures`. Run
 `python tests/platform_adapter_smoke.py` for an offline browser check of the
 Vivian, ZipRecruiter, LinkedIn, and Facebook adapters; it spends no provider credits.
 Run `python tests/healthcare_directory_adapter_smoke.py` for the equivalent
-NPI No., NPI Profile, NYSED, and U.S. News Doctor Finder extraction check.
+NPI No., NPI Profile, NYSED, U.S. News Doctor Finder, and MediFind extraction check.
 `python tests/quick_sourcer_panel_smoke.py` covers the public-records action and
 its result sheet against a mocked backend, so it contacts no external API.
 

@@ -52,7 +52,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.23.0"
+APP_VERSION = "3.25.4"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -1348,8 +1348,32 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
-    if str(candidate.get("source") or "").strip().casefold() != "usnews":
-        raise HTTPException(400, "Professional profile resumes are available for U.S. News profiles only.")
+    candidate_source = str(candidate.get("source") or "").strip().casefold()
+    source_rules = {
+        "usnews": (
+            lambda host, path: host == "health.usnews.com"
+            and bool(re.match(r"^/(?:doctors|nurse-practitioners)/", path, re.IGNORECASE)),
+            "U.S. News",
+        ),
+        "medifind": (
+            lambda host, path: (host == "medifind.com" or host.endswith(".medifind.com"))
+            and bool(re.match(r"^/doctors/[^/]+/\d+/?$", path, re.IGNORECASE)),
+            "MediFind",
+        ),
+        "commonspirit": (
+            lambda host, path: (host == "commonspirit.org" or host.endswith(".commonspirit.org"))
+            and bool(re.match(r"^/find-a-doctor/[^/]+-\d+/?$", path, re.IGNORECASE)),
+            "CommonSpirit Health",
+        ),
+        "sharecare": (
+            lambda host, path: host == "providers.sharecare.com"
+            and bool(re.match(r"^/doctor/[^/]+/?$", path, re.IGNORECASE)),
+            "Sharecare",
+        ),
+    }
+    rule = source_rules.get(candidate_source)
+    if not rule:
+        raise HTTPException(400, "Professional profile resumes are unavailable for this source.")
     try:
         source = urlsplit(body.source_url)
     except ValueError:
@@ -1357,13 +1381,15 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
     if (
         not source
         or source.scheme not in {"http", "https"}
-        or (source.hostname or "").casefold() != "health.usnews.com"
-        or not re.match(r"^/(?:doctors|nurse-practitioners)/", source.path, re.IGNORECASE)
+        or not rule[0]((source.hostname or "").casefold(), source.path)
     ):
-        raise HTTPException(400, "A valid U.S. News provider profile URL is required.")
+        raise HTTPException(400, f"A valid {rule[1]} provider profile URL is required.")
     profile = body.model_dump()
-    if not any((profile["education"], profile["certifications"], profile["licenses"])):
-        raise HTTPException(400, "The public profile has not finished loading its credentials.")
+    if not any((
+        profile["education"], profile["certifications"], profile["licenses"],
+        profile["specialties"], profile["hospitals"], profile["summary"],
+    )):
+        raise HTTPException(400, "The public profile has not finished loading professional details.")
     try:
         rendered = profile_resume.render(candidate, profile)
     except Exception as exc:

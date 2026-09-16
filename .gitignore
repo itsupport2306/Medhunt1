@@ -16,6 +16,8 @@ packaging/out/
 release.zip
 release/Medhunt-Setup.exe
 new_api.txt
+medifind.txt
+Commonspirit.txt
 reports/
 runtime_logs/
 .runtime/

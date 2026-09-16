@@ -19,7 +19,7 @@ from dotenv import dotenv_values
 
 
 APP_NAME = "Medhunt"
-APP_VERSION = "3.23.0"
+APP_VERSION = "3.25.4"
 SERVICE_NAME = "radixsol-sourcing-assistant"
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\RadixsolSourcingAssistant"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"

@@ -121,6 +121,24 @@ def _exercise(browser_type, executable: Path) -> dict:
               source_url: 'https://health.usnews.com/best-hospitals/wrong-section'
             },
           ], { platform: 'usnews' });
+          const sharecare = quality.sanitizeProfiles([
+            {
+              name: 'Raja Flores', location: 'New York, NY', source: 'sharecare',
+              source_id: '1306821244',
+              source_url: 'https://providers.sharecare.com/doctor/dr-raja-flores',
+              specialty: 'Cardiothoracic Surgery', specialties: ['Cardiothoracic Surgery'],
+              profile_document: {
+                kind: 'public_professional_profile', source_label: 'Sharecare',
+                source_url: 'https://providers.sharecare.com/doctor/dr-raja-flores',
+                specialties: ['Cardiothoracic Surgery'],
+                hospitals: ['Mount Sinai Morningside']
+              }
+            },
+            {
+              name: 'Wrong Sharecare Path', source: 'sharecare',
+              source_url: 'https://providers.sharecare.com/find-a-doctor/search'
+            }
+          ], { platform: 'sharecare' });
 
           return {
             apiFrozen: Object.isFrozen(quality),
@@ -129,6 +147,7 @@ def _exercise(browser_type, executable: Path) -> dict:
             vivian,
             facebook,
             usnews,
+            sharecare,
             facebookUrls: {
               profileId: quality.validProfileUrl(
                 'https://www.facebook.com/profile.php?id=12345', 'facebook'),
@@ -201,6 +220,10 @@ def main() -> None:
                 "Columbia University — Medical School"
             ], result
             assert result["usnews"]["skipped"]["invalid_source"] == 2, result
+            assert len(result["sharecare"]["profiles"]) == 1, result
+            assert result["sharecare"]["profiles"][0]["source"] == "sharecare", result
+            assert result["sharecare"]["profiles"][0]["profile_document"]["source_label"] == "Sharecare", result
+            assert result["sharecare"]["skipped"]["invalid_source"] == 1, result
             assert result["facebookUrls"] == {
                 "profileId": True,
                 "people": True,
@@ -213,7 +236,7 @@ def main() -> None:
             summaries[name] = {
                 "accepted": len(linkedin["profiles"]) + len(indeed["profiles"])
                 + len(result["vivian"]["profiles"]) + len(result["facebook"]["profiles"])
-                + len(result["usnews"]["profiles"]),
+                + len(result["usnews"]["profiles"]) + len(result["sharecare"]["profiles"]),
                 "skipped": linkedin["skippedCount"] + indeed["skippedCount"],
             }
 
