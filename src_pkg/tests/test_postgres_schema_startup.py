@@ -57,10 +57,11 @@ def test_postgres_namespace_is_created_and_selected(monkeypatch):
     monkeypatch.setattr(store.config, "DATABASE_SCHEMA", "medhunt")
 
     store._configure_postgres_namespace(connection)
+    store._activate_postgres_namespace(connection)
 
     assert connection.queries == [
         ('CREATE SCHEMA IF NOT EXISTS "medhunt"', ()),
-        ('SET search_path TO "medhunt"', ()),
+        ('SET LOCAL search_path TO "medhunt"', ()),
     ]
 
 

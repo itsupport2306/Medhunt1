@@ -409,12 +409,18 @@ def _prepare_postgres(connection):
 
 
 def _configure_postgres_namespace(connection):
-    """Keep Medhunt tables isolated from other apps sharing the database."""
+    """Create the isolated Medhunt namespace once per physical connection."""
     schema = config.DATABASE_SCHEMA
     # DATABASE_SCHEMA is validated as a PostgreSQL identifier in config.py.
     quoted_schema = '"' + schema.replace('"', '""') + '"'
     connection.execute(f"CREATE SCHEMA IF NOT EXISTS {quoted_schema}")
-    connection.execute(f"SET search_path TO {quoted_schema}")
+
+
+def _activate_postgres_namespace(connection):
+    """Pin every unit of work to Medhunt even through a transaction pooler."""
+    schema = config.DATABASE_SCHEMA
+    quoted_schema = '"' + schema.replace('"', '""') + '"'
+    connection.execute(f"SET LOCAL search_path TO {quoted_schema}")
 
 
 def _postgres_schema_is_current(connection):
@@ -471,10 +477,15 @@ def _conn():
             else:
                 connection = _Connection(raw, postgres=True)
             try:
-                _prepare_postgres(connection)
-                yield connection
-                if not raw.autocommit:
-                    raw.commit()
+                # Hosted PostgreSQL poolers may discard session-level SET
+                # values between autocommit statements. Keep schema setup and
+                # every application query in one transaction, with a SET LOCAL
+                # that is guaranteed to apply to that transaction's server
+                # connection.
+                with raw.transaction():
+                    _activate_postgres_namespace(connection)
+                    _prepare_postgres(connection)
+                    yield connection
             except Exception:
                 try:
                     if not raw.autocommit:
