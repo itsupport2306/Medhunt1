@@ -61,21 +61,34 @@ def test_prepare_postgres_runs_migrations_when_schema_is_incomplete(monkeypatch)
     assert connection.queries[1][0] == store._POSTGRES_SCHEMA[0]
 
 
-def test_legacy_enrichment_events_migration_adds_candidate_id_before_index():
-    migration = (
-        "ALTER TABLE enrichment_events "
-        "ADD COLUMN IF NOT EXISTS candidate_id BIGINT"
-    )
-    column_migration_index = store._POSTGRES_SCHEMA.index(migration)
-    index_creation_index = next(
-        index for index, statement in enumerate(store._POSTGRES_SCHEMA)
-        if statement.startswith(
-            "CREATE INDEX IF NOT EXISTS idx_enrichment_events_candidate"
-        )
-    )
+def test_legacy_candidate_columns_are_repaired_before_indexes():
+    indexed_tables = {
+        "enrichment_events": "idx_enrichment_events_candidate",
+        "talent_pool_members": "idx_pool_members_candidate",
+        "campaign_members": "idx_campaign_members_candidate",
+        "resumes": "idx_resumes_candidate",
+        "resume_extractions": "idx_resume_extractions_candidate",
+    }
+    candidate_tables = {
+        "enrichment_events", "outreach", "talent_pool_members",
+        "campaign_members", "resumes", "resume_extractions",
+        "provider_lookups", "lookup_run_items", "nexus_candidate_links",
+        "resume_capture_locks", "nexus_deliveries",
+    }
 
-    assert "candidate_id" in store._POSTGRES_REQUIRED_COLUMNS["enrichment_events"]
-    assert column_migration_index < index_creation_index
+    for table in candidate_tables:
+        migration = (
+            f"ALTER TABLE {table} "
+            "ADD COLUMN IF NOT EXISTS candidate_id BIGINT"
+        )
+        migration_index = store._POSTGRES_SCHEMA.index(migration)
+        assert "candidate_id" in store._POSTGRES_REQUIRED_COLUMNS[table]
+        if table in indexed_tables:
+            index_creation_index = next(
+                index for index, statement in enumerate(store._POSTGRES_SCHEMA)
+                if indexed_tables[table] in statement
+            )
+            assert migration_index < index_creation_index
 
 
 def test_nexus_startup_migration_selects_only_legacy_identity_keys(monkeypatch):

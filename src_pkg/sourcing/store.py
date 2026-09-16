@@ -247,11 +247,23 @@ _POSTGRES_SCHEMA = (
          last_error TEXT DEFAULT '', created DOUBLE PRECISION,
          updated DOUBLE PRECISION, UNIQUE(event_id, recipient)
        )""",
-    # Older deployments created this table before candidate-level attribution
-    # was added. CREATE TABLE IF NOT EXISTS does not evolve an existing table,
-    # so add the nullable column before creating its index. Historical events
-    # remain intact; new writes always provide a candidate_id.
+    # Older deployments may already contain one or more of these tables from
+    # before candidate-level attribution was added. CREATE TABLE IF NOT EXISTS
+    # does not evolve an existing table, so repair every candidate-bearing
+    # table before creating indexes or serving requests. Keep the added columns
+    # nullable so historical rows are preserved; all current writes supply the
+    # candidate id.
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE campaign_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE resume_extractions ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE provider_lookups ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE lookup_run_items ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE nexus_candidate_links ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE resume_capture_locks ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE nexus_deliveries ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS hometown TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''",
@@ -321,6 +333,9 @@ _POSTGRES_REQUIRED_TABLES = (
 )
 _POSTGRES_REQUIRED_COLUMNS = {
     "enrichment_events": ("candidate_id",),
+    "outreach": ("candidate_id",),
+    "talent_pool_members": ("candidate_id",),
+    "campaign_members": ("candidate_id",),
     "candidates": (
         "hometown", "source", "source_url", "source_id", "verification",
         "canonical_name", "identity_status", "identity_score",
@@ -329,9 +344,15 @@ _POSTGRES_REQUIRED_COLUMNS = {
         "contact_expires_at",
     ),
     "resumes": (
-        "storage_provider", "object_key", "bucket", "public_url",
+        "candidate_id", "storage_provider", "object_key", "bucket", "public_url",
         "checksum_sha256", "etag",
     ),
+    "resume_extractions": ("candidate_id",),
+    "provider_lookups": ("candidate_id",),
+    "lookup_run_items": ("candidate_id",),
+    "nexus_candidate_links": ("candidate_id",),
+    "resume_capture_locks": ("candidate_id",),
+    "nexus_deliveries": ("candidate_id",),
 }
 _POSTGRES_REQUIRED_INDEXES = (
     "idx_enrichment_events_user", "idx_enrichment_events_candidate",
