@@ -33,6 +33,22 @@ from .person_name import identity_signature, is_name_suffix, normalize_person_na
 
 _SURNAME_PARTICLES = {"da", "de", "del", "della", "der", "di", "du", "la", "le", "van", "von"}
 
+# Public profile sites and Nexus occasionally use different labels for the
+# same clinical specialty. Keep this list deliberately small and semantic:
+# exact Nexus labels are always tried first, then only reviewed equivalents.
+# Any value that still cannot be resolved uses Nexus's explicit Unknown pair
+# instead of a guessed specialty from an unrelated profession.
+_SPECIALTY_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "family medicine": ("Family Practice", "Family Practice/Primary Care"),
+    "family practice": ("Family Medicine", "Family Practice/Primary Care"),
+    "primary care": ("Family Practice/Primary Care", "Family Practice"),
+    "thoracic surgery": ("Surgery-Thoracic", "CardioThoracic Surgery"),
+    "cardiothoracic surgery": ("CardioThoracic Surgery", "Surgery-Thoracic"),
+    "ob gyn": ("Obstetrics & Gynecology",),
+    "obgyn": ("Obstetrics & Gynecology",),
+    "obstetrics and gynecology": ("Obstetrics & Gynecology",),
+}
+
 
 class NexusDeliveryError(RuntimeError):
     """Base class with a safe message suitable for an outbox status row."""
@@ -697,6 +713,16 @@ def _candidate_specialties(candidate: Mapping[str, Any], accepted: Mapping[str, 
     return _text_values(values)
 
 
+def _specialty_master_labels(values: Sequence[str]) -> list[str]:
+    """Return source labels followed by approved Nexus label equivalents."""
+    expanded: list[str] = []
+    for value in _text_values(values):
+        expanded.append(value)
+        alias_key = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+        expanded.extend(_SPECIALTY_ALIASES.get(alias_key, ()))
+    return _text_values(expanded)
+
+
 def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
     candidate = payload.get("candidate") if isinstance(payload.get("candidate"), Mapping) else payload
     assert isinstance(candidate, Mapping)
@@ -1013,6 +1039,24 @@ def _default_id(profile: Mapping[str, Any], singular: str, plural: str = "") -> 
         ) from exc
 
 
+def _unknown_classification(client: NexusClient) -> tuple[int, int]:
+    """Resolve Nexus's internally consistent Unknown profession/specialty pair."""
+    profession_id = _preferred_master_id(
+        client, "professions", ("Unknown",), description="profession"
+    )
+    specialty_id = _preferred_master_id(
+        client,
+        "specialties",
+        ("Unknown",),
+        description="specialty",
+        extra_predicate=lambda row: (
+            not row.get("professionId")
+            or int(row["professionId"]) == profession_id
+        ),
+    )
+    return profession_id, specialty_id
+
+
 def _build_profile(
     client: NexusClient,
     identity: Mapping[str, Any],
@@ -1152,15 +1196,16 @@ def _build_profile(
     if actual_specialties:
         # The captured specialty is candidate data, not a tenant default. It
         # therefore takes precedence over a configured generic specialty ID.
-        # Resolve exact Nexus master data only; a miss is held for review so we
-        # never replace a real specialty with an unrelated guess.
+        # Try the source label first and then only approved semantic aliases.
+        # This keeps the mapping deterministic and profession-aware.
+        specialty_values = _specialty_master_labels(actual_specialties)
         specialty_row = None
         if profession_id:
             try:
                 specialty_row = _preferred_master_row(
                     client,
                     "specialties",
-                    actual_specialties,
+                    specialty_values,
                     description="candidate specialty",
                     extra_predicate=lambda row: (
                         not row.get("professionId")
@@ -1170,24 +1215,32 @@ def _build_profile(
             except NexusPermanentError:
                 specialty_row = None
         if specialty_row is None:
-            specialty_row = _preferred_master_row(
-                client,
-                "specialties",
-                actual_specialties,
-                description="candidate specialty",
-            )
-        specialty_id = int(_master_id(specialty_row, "specialties"))
-        related_profession = specialty_row.get("professionId")
-        if related_profession:
             try:
-                profession_id = int(related_profession)
-            except (TypeError, ValueError) as exc:
-                raise NexusPermanentError(
-                    "Nexus specialty contains an invalid profession ID.",
-                    operation="master_data",
-                ) from exc
+                specialty_row = _preferred_master_row(
+                    client,
+                    "specialties",
+                    specialty_values,
+                    description="candidate specialty",
+                )
+            except NexusPermanentError:
+                specialty_row = None
+        if specialty_row is None:
+            profession_id, specialty_id = _unknown_classification(client)
             profile["professionId"] = profession_id
             profile["professionIds"] = [profession_id]
+        else:
+            specialty_id = int(_master_id(specialty_row, "specialties"))
+            related_profession = specialty_row.get("professionId")
+            if related_profession:
+                try:
+                    profession_id = int(related_profession)
+                except (TypeError, ValueError) as exc:
+                    raise NexusPermanentError(
+                        "Nexus specialty contains an invalid profession ID.",
+                        operation="master_data",
+                    ) from exc
+                profile["professionId"] = profession_id
+                profile["professionIds"] = [profession_id]
     elif not profile.get("jobId") and not specialty_id:
         try:
             specialty_id = _preferred_master_id(
@@ -1209,21 +1262,9 @@ def _build_profile(
             # silently replaced.
             if specialty_name or not profession_inferred:
                 raise
-            profession_id = _preferred_master_id(
-                client, "professions", ("Unknown",), description="profession"
-            )
+            profession_id, specialty_id = _unknown_classification(client)
             profile["professionId"] = profession_id
             profile["professionIds"] = [profession_id]
-            specialty_id = _preferred_master_id(
-                client,
-                "specialties",
-                ("Unknown",),
-                description="specialty",
-                extra_predicate=lambda row: (
-                    not row.get("professionId")
-                    or int(row["professionId"]) == profession_id
-                ),
-            )
     if specialty_id:
         profile["specialtyId"] = specialty_id
         profile["primarySpecialtyId"] = specialty_id

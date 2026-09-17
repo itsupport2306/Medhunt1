@@ -595,7 +595,7 @@ NEXUS_TOKEN_URL=<tenant OAuth token URL>
 NEXUS_USERNAME=<backend API user>
 NEXUS_PASSWORD=<backend API password>
 NEXUS_ORG_CODE=<organization code, when required>
-NEXUS_DEFAULT_PROFILE={"referralSourceId":5638,"jobTypeIds":["TRAVEL"],"professionId":123,"specialtyId":456}
+NEXUS_DEFAULT_PROFILE={"referralSourceName":"MedHunt","jobTypeIds":["TRAVEL"]}
 ```
 
 For `client_credentials`, provide `NEXUS_CLIENT_ID` and
@@ -623,12 +623,12 @@ in `.env.example` are optional tenant overrides.
 `NEXUS_DEFAULT_PROFILE` must provide valid tenant routing, including at least
 one `jobTypeIds` value and a referral source. It may provide a `jobId` or exact
 profession/specialty fallback IDs. When the captured platform profile declares
-a specialty, Medhunt resolves that exact label from the live Nexus specialty
-catalog and sends its specialty ID; the catalog's related profession ID keeps
-the two fields consistent. A missing or ambiguous declared specialty is held
-for review instead of being replaced by a generic default. Profiles without a
-declared specialty can still use the configured fallback, or the tenant's
-Unknown/Other/General specialty master data.
+a specialty, Medhunt first resolves that label from the live Nexus specialty
+catalog and then tries a small reviewed set of equivalent Nexus labels; the
+catalog's related profession ID keeps the two fields consistent. If no safe
+mapping exists, Medhunt sends the tenant's explicit Unknown profession and
+Unknown specialty pair. Profiles without a declared specialty can still use
+the configured fallback, or the tenant's Unknown/Other/General master data.
 
 For contacts, Nexus receives one primary email and one primary phone. The
 email is the first trusted, non-DNC address in provider order. Phone selection

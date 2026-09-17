@@ -3725,7 +3725,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.25.13"
+    assert manifest["version"] == "3.25.14"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()

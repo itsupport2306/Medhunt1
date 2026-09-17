@@ -191,23 +191,63 @@ def test_actual_candidate_specialty_overrides_generic_default_and_aligns_profess
     assert result["nexus_candidate_id"] == 705
 
 
-def test_actual_candidate_specialty_must_match_nexus_master_data():
+def test_unmatched_candidate_specialty_uses_unknown_classification():
     def handler(request):
         if request.url.path.endswith("/candidates/search"):
             return httpx.Response(200, json={"records": []})
         if request.url.path.endswith("/master/specialties"):
             return httpx.Response(200, json=[
-                {"specialtyId": 20, "professionId": 10, "name": "Unknown", "active": True},
+                {"specialtyId": 199, "professionId": 99, "name": "Unknown", "active": True},
             ])
+        if request.url.path.endswith("/master/professions"):
+            return httpx.Response(200, json=[
+                {"professionId": 99, "name": "Unknown", "active": True},
+            ])
+        if request.url.path.endswith("/candidate/webhook/create"):
+            content = request.content.decode("latin-1")
+            assert '"professionId":99' in content
+            assert '"specialtyId":199' in content
+            return httpx.Response(201, json={"id": 707})
         raise AssertionError(request.url)
 
     settings = _settings()
-    with pytest.raises(nexus_sync.NexusPermanentError) as raised:
-        nexus_sync.process_delivery(
-            _payload(notes="Specialty: Urology"), PDF,
-            settings=settings, client=_client(settings, handler),
-        )
-    assert raised.value.operation == "master_data"
+    result = nexus_sync.process_delivery(
+        _payload(notes="Specialty: Unlisted Clinical Field"), PDF,
+        settings=settings, client=_client(settings, handler),
+    )
+    assert result["nexus_candidate_id"] == 707
+
+
+@pytest.mark.parametrize(
+    ("source_label", "nexus_label"),
+    [
+        ("Family Medicine", "Family Practice"),
+        ("Primary Care", "Family Practice/Primary Care"),
+        ("Thoracic Surgery", "Surgery-Thoracic"),
+        ("OB-GYN", "Obstetrics & Gynecology"),
+    ],
+)
+def test_candidate_specialty_uses_reviewed_nexus_alias(source_label, nexus_label):
+    def handler(request):
+        if request.url.path.endswith("/candidates/search"):
+            return httpx.Response(200, json={"records": []})
+        if request.url.path.endswith("/master/specialties"):
+            return httpx.Response(200, json=[
+                {"specialtyId": 321, "professionId": 10, "name": nexus_label, "active": True},
+            ])
+        if request.url.path.endswith("/candidate/webhook/create"):
+            content = request.content.decode("latin-1")
+            assert '"professionId":10' in content
+            assert '"specialtyId":321' in content
+            return httpx.Response(201, json={"id": 708})
+        raise AssertionError(request.url)
+
+    settings = _settings()
+    result = nexus_sync.process_delivery(
+        _payload(notes=f"Specialty: {source_label}"), PDF,
+        settings=settings, client=_client(settings, handler),
+    )
+    assert result["nexus_candidate_id"] == 708
 
 
 def test_primary_email_must_belong_to_trusted_filtered_email_list():
