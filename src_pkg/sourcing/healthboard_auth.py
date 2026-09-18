@@ -86,3 +86,57 @@ def report_enrichment(token: str, *, event_id: str, candidate_id: int,
     )
     response.raise_for_status()
     return bool(response.json().get("recorded", True))
+
+
+def list_recruiters(token: str) -> list[dict]:
+    response = httpx.get(
+        _url("/api/extension/team/recruiters"),
+        headers={"X-Capture-Token": str(token or "").strip()},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    return list(payload.get("items") or [])
+
+
+def assign_conversation(token: str, *, conversation: dict, recruiter_user_id: str) -> dict:
+    response = httpx.post(
+        _url("/api/extension/medhunt/conversations/assign"),
+        headers={"X-Capture-Token": str(token or "").strip()},
+        json={
+            "conversation_id": str(conversation.get("id") or ""),
+            "candidate_id": str(conversation.get("candidate_id") or ""),
+            "nexus_candidate_id": str(conversation.get("nexus_candidate_id") or ""),
+            "candidate_name": str(conversation.get("candidate_name") or ""),
+            "recruiter_user_id": str(recruiter_user_id or ""),
+        },
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def report_message_event(*, event_id: str, conversation: dict, event_type: str,
+                         message_preview: str = "") -> bool:
+    """Report asynchronous Zoom activity without exposing a user's session."""
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not enabled() or not token:
+        return False
+    response = httpx.post(
+        _url("/api/extension/medhunt/events"),
+        headers={"X-Medhunt-Service-Token": token},
+        json={
+            "event_id": str(event_id),
+            "conversation_id": str(conversation.get("id") or ""),
+            "candidate_id": str(conversation.get("candidate_id") or ""),
+            "nexus_candidate_id": str(conversation.get("nexus_candidate_id") or ""),
+            "candidate_name": str(conversation.get("candidate_name") or ""),
+            "initiated_by_user_id": str(conversation.get("initiated_by") or ""),
+            "assigned_recruiter_user_id": str(conversation.get("assigned_recruiter_id") or ""),
+            "event_type": str(event_type),
+            "message_preview": str(message_preview or "")[:240],
+        },
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return bool(response.json().get("recorded", True))

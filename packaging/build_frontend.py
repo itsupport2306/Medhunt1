@@ -52,6 +52,16 @@ def build(source: Path, output: Path) -> None:
         else:
             shutil.copy2(item, target)
 
+    # Brand artwork referenced by the UI is not declared as a manifest icon,
+    # so copy it explicitly into the staged extension as well.
+    for relative in ("icons/medhunt-logo.png", "icons/medhunt-mark.png"):
+        source_asset = source / relative
+        target_asset = output / relative
+        if not source_asset.is_file():
+            raise RuntimeError(f"Production extension asset is missing: {relative}")
+        target_asset.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_asset, target_asset)
+
     manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     icon_paths = {
         *manifest.get("icons", {}).values(),

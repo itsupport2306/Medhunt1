@@ -33,6 +33,7 @@ ROOT_PUBLIC_FILES = {
     "inject.js", "linkedin-content.js", "manifest.json",
     "platform-content.js", "platform-main.js", "privacy.html", "profile-quality.js",
     "styles.css",
+    "icons/medhunt-logo.png", "icons/medhunt-mark.png",
 }
 
 

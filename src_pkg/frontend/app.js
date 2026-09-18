@@ -152,6 +152,7 @@ let jobs = [];
 let activeJobId = null;
 let activeView = IS_EXTENSION ? "indeed" : "candidates";
 let activeDraft = null;
+let activeSmsContext = null;
 let activeIndeedProfile = null;
 let publicRecordReturnProfile = null;
 let activePublicRecordResult = null;
@@ -508,6 +509,7 @@ function candidateCard(candidate) {
       <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}">Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
+      ${phoneContact?.kind === "mobile" ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(phone)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -915,7 +917,7 @@ async function login({ requirePrivacyConsent = false } = {}) {
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="medhuntLoginTitle">
       <div class="privacy-dialog-header">
-        <div class="privacy-dialog-mark" aria-hidden="true">M</div>
+        <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
         <div><span class="privacy-eyebrow">Healthcareboard access</span><h2 id="medhuntLoginTitle">Sign in to Medhunt</h2></div>
       </div>
       <p class="muted">Use the email address on your Healthcareboard recruiter account.</p>
@@ -948,7 +950,7 @@ async function requestLoginCode() {
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="medhuntCodeTitle">
       <div class="privacy-dialog-header">
-        <div class="privacy-dialog-mark" aria-hidden="true">M</div>
+        <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
         <div><span class="privacy-eyebrow">Healthcareboard access</span><h2 id="medhuntCodeTitle">Enter your email code</h2></div>
       </div>
       <p class="muted">We sent a six-digit code to ${escapeHtml(email)}. It expires in 10 minutes.</p>
@@ -1004,7 +1006,7 @@ function showPrivacyConsent() {
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <div class="dialog privacy-dialog" role="dialog" aria-modal="true" aria-labelledby="medhuntPrivacyTitle" aria-describedby="medhuntPrivacyDescription">
       <div class="privacy-dialog-header">
-        <div class="privacy-dialog-mark" aria-hidden="true">M</div>
+        <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
         <div><span class="privacy-eyebrow">Secure workspace</span><h2 id="medhuntPrivacyTitle">Before Medhunt reads profile data</h2></div>
       </div>
       <p class="privacy-dialog-lede">Review how candidate information is handled before you continue.</p>
@@ -1895,6 +1897,7 @@ function indeedResultStatus(profile) {
       : "";
     const shownEmails = emails.slice(0, ROW_CONTACT_LIMIT);
     const shownPhones = phoneContacts.slice(0, ROW_CONTACT_LIMIT);
+    const mobile = phoneContacts.find((phone) => phone.kind === "mobile");
     return `<div class="lookup-contact">
       <span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>
       ${shownEmails.map((email) => `<span class="lookup-value">${escapeHtml(email)}</span>`).join("")}
@@ -1906,6 +1909,7 @@ function indeedResultStatus(profile) {
       ${hometownMatch}
       ${resume}
       ${resumeStatus}
+      ${mobile ? `<button type="button" class="resume-link sms-inline" data-action="compose-sms" data-candidate-id="${Number(profile._candidateId)}" data-candidate-name="${escapeHtml(profile.name)}" data-phone="${escapeHtml(mobile.value)}">Send SMS</button>` : ""}
     </div>`;
   }
   if (result.status === "not_found") {
@@ -2096,7 +2100,7 @@ function indeedPanelHeader() {
   const serviceState = progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline");
   return `
     <header class="source-shell-header panel-brand${progress ? " is-busy" : ""}" data-testid="source-header" data-progress-kind="${progress?.kind || "none"}" aria-busy="${progress ? "true" : "false"}">
-      <div class="medhunt-mark" aria-hidden="true"><span>M</span></div>
+      <img class="medhunt-mark" src="icons/medhunt-mark.png" alt="" aria-hidden="true">
       <div class="source-brand-copy">
         <strong>Medhunt</strong>
         <span id="sourceHeaderStatus">${escapeHtml(serviceState)}</span>
@@ -3814,6 +3818,152 @@ async function copyDraft() {
   notify("Draft copied to the clipboard.");
 }
 
+async function showSmsComposer(candidateId, candidateName, phone) {
+  if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
+  activeSmsContext = { candidateId, candidateName, phone };
+  const [status, consentResult] = await Promise.all([
+    api("/messaging/status"),
+    api(`/candidates/${candidateId}/sms-consent?phone=${encodeURIComponent(phone)}`),
+  ]);
+  const consent = consentResult.consent;
+  const testModeBypass = consentResult.test_mode_bypass === true;
+  const permitted = consent?.status === "opted_in" || testModeBypass;
+  const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
+  const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
+  $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
+    <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
+      <span class="section-kicker">Zoom Phone</span>
+      <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
+      <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
+      ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
+      ${testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(consent.source)}</div>` : `
+        <div class="sms-consent-panel">
+          <strong>Record documented SMS permission</strong>
+          <p class="muted small">Select the source where this candidate agreed to receive recruiting texts. Public profile data alone is not permission.</p>
+          <label class="field-label" for="smsConsentSource">Permission source</label>
+          <select id="smsConsentSource">
+            <option value="application">Job application</option>
+            <option value="talent_pool">Talent-pool signup</option>
+            <option value="written">Written agreement</option>
+            <option value="verbal">Verbal agreement</option>
+            <option value="inbound_sms">Candidate initiated by SMS</option>
+          </select>
+          <label class="field-label" for="smsConsentEvidence">Evidence/reference</label>
+          <textarea id="smsConsentEvidence" rows="3" placeholder="Date, form or record reference"></textarea>
+          <button type="button" class="btn" data-action="record-sms-consent">Save permission record</button>
+        </div>`}
+      <label class="field-label" for="smsMessage">Message</label>
+      <textarea id="smsMessage" rows="6" maxlength="420"${permitted ? "" : " disabled"}>${escapeHtml(defaultMessage)}</textarea>
+      <p class="muted small">Medhunt automatically adds its identity and “Reply STOP to opt out” to each message.</p>
+      <div class="row modal-actions">
+        <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
+        <button type="button" class="btn teal" data-action="send-sms"${permitted && status.enabled ? "" : " disabled"}>Send with Zoom Phone</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+async function composeSmsFromButton(button) {
+  await showSmsComposer(
+    Number(button.dataset.candidateId),
+    button.dataset.candidateName || "Candidate",
+    button.dataset.phone || "",
+  );
+}
+
+async function recordSmsConsent() {
+  if (!activeSmsContext) throw new Error("Candidate message context expired.");
+  const source = $("#smsConsentSource")?.value || "";
+  const evidence = $("#smsConsentEvidence")?.value.trim() || "";
+  if (evidence.length < 3) throw new Error("Enter the permission record reference.");
+  await api(`/candidates/${activeSmsContext.candidateId}/sms-consent`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      phone: activeSmsContext.phone,
+      status: "opted_in",
+      source,
+      evidence,
+      disclosure_version: "medhunt-sms-v1",
+    }),
+  });
+  notify("SMS permission record saved.");
+  await showSmsComposer(
+    activeSmsContext.candidateId, activeSmsContext.candidateName, activeSmsContext.phone,
+  );
+}
+
+async function sendCandidateSms() {
+  if (!activeSmsContext) throw new Error("Candidate message context expired.");
+  const message = $("#smsMessage")?.value.trim() || "";
+  if (!message) throw new Error("Write a message before sending.");
+  await api("/messaging/sms", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidate_id: activeSmsContext.candidateId,
+      phone: activeSmsContext.phone,
+      message,
+      request_id: crypto.randomUUID(),
+    }),
+    timeout: 60000,
+  });
+  closeModal();
+  notify("Message accepted by Zoom Phone.");
+}
+
+async function viewMessages() {
+  $("#title").textContent = "Messages";
+  try {
+    const data = await api("/messaging/conversations");
+    const items = data.items || [];
+    $("#content").innerHTML = `<div class="card messages-card">
+      <div class="row spread"><div><h3>Candidate conversations</h3><p class="muted small">Replies can be assigned to a Healthboard recruiter.</p></div><span class="pill live">${items.length}</span></div>
+      <div class="conversation-list">
+        ${items.length ? items.map((item) => `<button type="button" class="conversation-row" data-action="open-conversation" data-conversation-id="${Number(item.id)}">
+          <span><strong>${escapeHtml(item.candidate_name || `Candidate ${item.candidate_id}`)}</strong><small>${escapeHtml(item.candidate_phone || "")}</small></span>
+          <span><b>${escapeHtml(item.status || "open")}</b><small>${item.assigned_recruiter_name ? `Assigned to ${escapeHtml(item.assigned_recruiter_name)}` : "Unassigned"}</small></span>
+        </button>`).join("") : `<p class="muted">No SMS conversations yet.</p>`}
+      </div>
+    </div>`;
+  } catch (error) {
+    $("#content").innerHTML = backendError(error);
+  }
+}
+
+async function openConversation(conversationId) {
+  const [conversation, recruiters] = await Promise.all([
+    api(`/messaging/conversations/${conversationId}`),
+    api("/messaging/recruiters").catch(() => ({ items: [] })),
+  ]);
+  const items = recruiters.items || [];
+  $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
+    <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="conversationTitle">
+      <h3 id="conversationTitle">${escapeHtml(conversation.candidate_name || "Candidate conversation")}</h3>
+      <div class="message-thread">${(conversation.messages || []).map((message) => `<div class="message-bubble ${message.direction === "inbound" ? "inbound" : "outbound"}"><span>${escapeHtml(message.body)}</span><small>${escapeHtml(message.status || "")}</small></div>`).join("")}</div>
+      <label class="field-label" for="conversationRecruiter">Assign reply</label>
+      <select id="conversationRecruiter"><option value="">Choose recruiter</option>${items.map((item) => `<option value="${escapeHtml(item.user_id)}">${escapeHtml(item.name || item.email || item.user_id)}</option>`).join("")}</select>
+      <div class="row modal-actions">
+        <button type="button" class="btn ghost" data-action="close-modal">Close</button>
+        <button type="button" class="btn teal" data-action="assign-conversation" data-conversation-id="${Number(conversation.id)}"${items.length ? "" : " disabled"}>Assign in Healthboard</button>
+      </div>
+    </section>
+  </div>`;
+}
+
+async function assignConversation(conversationId) {
+  const recruiter = $("#conversationRecruiter")?.value || "";
+  if (!recruiter) throw new Error("Choose a recruiter.");
+  await api(`/messaging/conversations/${conversationId}/assign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recruiter_user_id: recruiter }),
+  });
+  closeModal();
+  notify("Conversation assigned in Healthboard.");
+  if (activeView === "messages") await viewMessages();
+}
+
 async function viewPipeline() {
   $("#title").textContent = "Pipeline";
   try {
@@ -3930,6 +4080,7 @@ const views = {
   indeed: viewIndeed,
   add: viewAdd,
   pipeline: viewPipeline,
+  messages: viewMessages,
   dnc: viewDnc,
   analytics: viewAnalytics,
   settings: viewSettings,
@@ -4063,6 +4214,11 @@ document.addEventListener("click", async (event) => {
     "rank-all": rankAll,
     "move": () => moveCandidate(id),
     "draft": () => draftOutreach(id),
+    "compose-sms": () => composeSmsFromButton(button),
+    "record-sms-consent": recordSmsConsent,
+    "send-sms": sendCandidateSms,
+    "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
+    "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),
     "approve-draft": () => approveDraft(id),
     "copy-draft": copyDraft,
     "add-dnc": addDnc,

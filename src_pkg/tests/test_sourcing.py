@@ -1,6 +1,8 @@
 """End-to-end sourcing tests in demo mode (no live Enformion key needed)."""
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -43,6 +45,7 @@ from sourcing import (
     healthboard_auth,
     quick_sourcer_client,
     profile_resume,
+    zoom_sms,
 )
 
 # Tests always use isolated SQLite and mocked object storage, regardless of the
@@ -3257,7 +3260,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.25.4"
+            assert health_body["version"] == "3.26.2"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3725,7 +3728,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.25.14"
+    assert manifest["version"] == "3.26.2"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -4271,18 +4274,139 @@ def test_frontend_locks_captured_candidates_during_lookup():
     assert "const cards = displayedResultCards();" in content_script
     assert "context.nameElement, context.root, true" in content_script
 
-    assert "let indeedLookupProfiles = [];" in app_script
-    assert "indeedLookupProfiles = profiles.slice();" in app_script
-    assert 'indeedLookupFor(profile)?.status === "not_found"' in app_script
-    assert 'indeedLookupFor(profile)?.status === "failed"' in app_script
-    assert "No candidates in this result filter" in app_script
-    assert "scanGeneration !== indeedScanGeneration" in app_script
-    assert 'indeedLookupInProgress || ["scanning", "lookup", "results"].includes' in app_script
-    assert "Only irrelevant, duplicate, or incomplete items were detected and skipped." in app_script
-    assert "finally {\n    indeedLookupInProgress = false;" in app_script
-    assert "allowPageIdentity = false" in content_script
-    assert "linkedSourceUrl || allowPageIdentity" in content_script
-    assert "root.contains(closestCard)" in content_script
-    assert "const sourceId = cardAutoSourceId || identity.sourceId ||" in content_script
-    assert "const cards = displayedResultCards();" in content_script
-    assert "context.nameElement, context.root, true" in content_script
+
+def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
+    store.reset()
+    candidate_id = store.add_candidate("Taylor Nurse", "Atlanta, GA", source="sharecare")
+    quick_sourcer_client.apply_to_candidate(candidate_id, {
+        "status": "found",
+        "name": "Taylor Nurse",
+        "source": "test fixture",
+        "emails": [],
+        "phones": [{"value": "+14045550123", "type": "Wireless"}],
+        "addresses": ["Atlanta, GA"],
+    })
+    monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: {
+        "message_id": "zoom-message-1", "session_id": "zoom-session-1",
+    })
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            body = {
+                "candidate_id": candidate_id,
+                "phone": "+14045550123",
+                "message": "Hi Taylor, are you open to an opportunity?",
+                "request_id": "sms-test-request-1",
+            }
+            blocked = await client.post("/messaging/sms", json=body)
+            assert blocked.status_code == 409
+
+            consent = await client.post(
+                f"/candidates/{candidate_id}/sms-consent",
+                json={
+                    "phone": "+14045550123", "status": "opted_in",
+                    "source": "application", "evidence": "Application form 2026-09-18",
+                    "disclosure_version": "medhunt-sms-v1",
+                },
+            )
+            assert consent.status_code == 200
+            assert consent.json()["consent"]["status"] == "opted_in"
+
+            sent = await client.post("/messaging/sms", json=body)
+            assert sent.status_code == 200, sent.text
+            conversation = sent.json()["conversation"]
+            assert conversation["zoom_session_id"] == "zoom-session-1"
+            assert conversation["messages"][0]["status"] == "accepted"
+            assert "Reply STOP to opt out" in conversation["messages"][0]["body"]
+
+            repeated = await client.post("/messaging/sms", json=body)
+            assert repeated.status_code == 200
+            assert len(repeated.json()["conversation"]["messages"]) == 1
+
+            monkeypatch.setattr(config, "ZOOM_WEBHOOK_SECRET_TOKEN", "webhook-secret")
+            incoming = {
+                "event": "phone.sms_received", "event_ts": int(time.time() * 1000),
+                "payload": {"object": {
+                    "message_id": "zoom-inbound-1", "session_id": "zoom-session-1",
+                    "message": "STOP", "sender": {"phone_number": "+14045550123"},
+                    "to_members": [{"phone_number": "+14045550999"}],
+                }},
+            }
+            raw = json.dumps(incoming, separators=(",", ":")).encode()
+            timestamp = str(int(time.time()))
+            signature = "v0=" + hmac.new(
+                b"webhook-secret", b"v0:" + timestamp.encode() + b":" + raw,
+                hashlib.sha256,
+            ).hexdigest()
+            webhook = await client.post(
+                "/integrations/zoom/webhook", content=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-zm-request-timestamp": timestamp,
+                    "x-zm-signature": signature,
+                },
+            )
+            assert webhook.status_code == 200, webhook.text
+            assert store.is_dnc("+14045550123") is True
+            assert store.get_sms_consent(candidate_id, "+14045550123")["status"] == "opted_out"
+            saved = store.get_sms_conversation(conversation["id"])
+            assert saved["status"] == "opted_out"
+            assert saved["messages"][-1]["body"] == "STOP"
+
+    asyncio.run(exercise())
+
+
+def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeypatch):
+    store.reset()
+    allowed_id = store.add_candidate("Owned Test Phone", "Atlanta, GA", source="test")
+    blocked_id = store.add_candidate("Unlisted Phone", "Atlanta, GA", source="test")
+    for candidate_id, phone in (
+        (allowed_id, "+14045550123"),
+        (blocked_id, "+14045550124"),
+    ):
+        quick_sourcer_client.apply_to_candidate(candidate_id, {
+            "status": "found", "name": "Test Recipient", "source": "test fixture",
+            "emails": [], "phones": [{"value": phone, "type": "Wireless"}],
+            "addresses": ["Atlanta, GA"],
+        })
+    monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", True)
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ("+1 (404) 555-0123",))
+    calls = []
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+        calls.append((phone, message)) or {
+            "message_id": "zoom-test-message", "session_id": "zoom-test-session",
+        }
+    ))
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            consent_state = await client.get(
+                f"/candidates/{allowed_id}/sms-consent",
+                params={"phone": "+14045550123"},
+            )
+            assert consent_state.status_code == 200
+            assert consent_state.json()["test_mode_bypass"] is True
+
+            sent = await client.post("/messaging/sms", json={
+                "candidate_id": allowed_id, "phone": "+14045550123",
+                "message": "Test message", "request_id": "allowlisted-test-message",
+            })
+            assert sent.status_code == 200, sent.text
+            assert len(calls) == 1
+
+            blocked = await client.post("/messaging/sms", json={
+                "candidate_id": blocked_id, "phone": "+14045550124",
+                "message": "This must not send", "request_id": "unlisted-test-message",
+            })
+            assert blocked.status_code == 409
+            assert len(calls) == 1
+
+    asyncio.run(exercise())

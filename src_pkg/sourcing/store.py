@@ -46,6 +46,27 @@ CREATE TABLE IF NOT EXISTS candidates(
 CREATE TABLE IF NOT EXISTS outreach(
   id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, channel TEXT,
   subject TEXT, body TEXT, status TEXT DEFAULT 'draft', created REAL);
+CREATE TABLE IF NOT EXISTS sms_consents(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER NOT NULL,
+  phone_key TEXT NOT NULL, phone TEXT NOT NULL, status TEXT NOT NULL,
+  source TEXT NOT NULL, evidence TEXT DEFAULT '', disclosure_version TEXT DEFAULT 'v1',
+  captured_by TEXT DEFAULT '', captured_at REAL, created REAL, updated REAL,
+  UNIQUE(candidate_id, phone_key));
+CREATE TABLE IF NOT EXISTS sms_conversations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER NOT NULL,
+  nexus_candidate_id TEXT DEFAULT '', candidate_name TEXT DEFAULT '',
+  candidate_phone TEXT NOT NULL, phone_key TEXT NOT NULL,
+  initiated_by TEXT DEFAULT '', assigned_recruiter_id TEXT DEFAULT '',
+  assigned_recruiter_email TEXT DEFAULT '', assigned_recruiter_name TEXT DEFAULT '',
+  zoom_sender_number TEXT DEFAULT '', zoom_session_id TEXT DEFAULT '',
+  status TEXT DEFAULT 'open', created REAL, updated REAL, last_message_at REAL);
+CREATE TABLE IF NOT EXISTS sms_messages(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL,
+  direction TEXT NOT NULL, body TEXT NOT NULL, status TEXT DEFAULT 'queued',
+  zoom_message_id TEXT DEFAULT '', request_id TEXT UNIQUE,
+  failure_reason TEXT DEFAULT '', created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS sms_webhook_events(
+  event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL);
 CREATE TABLE IF NOT EXISTS talent_pools(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
   created REAL, updated REAL);
@@ -129,6 +150,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_active_identity
   ON nexus_deliveries(identity_key) WHERE status IN ('processing','writing');
 CREATE INDEX IF NOT EXISTS idx_watcher_email_delivery_status
   ON watcher_email_deliveries(status, lease_until);
+CREATE INDEX IF NOT EXISTS idx_sms_conversations_candidate
+  ON sms_conversations(candidate_id, updated);
+CREATE INDEX IF NOT EXISTS idx_sms_conversations_session
+  ON sms_conversations(zoom_session_id);
+CREATE INDEX IF NOT EXISTS idx_sms_messages_conversation
+  ON sms_messages(conversation_id, created);
 """
 
 _POSTGRES_SCHEMA = (
@@ -247,6 +274,35 @@ _POSTGRES_SCHEMA = (
          last_error TEXT DEFAULT '', created DOUBLE PRECISION,
          updated DOUBLE PRECISION, UNIQUE(event_id, recipient)
        )""",
+    """CREATE TABLE IF NOT EXISTS sms_consents(
+         id BIGSERIAL PRIMARY KEY, candidate_id BIGINT NOT NULL,
+         phone_key TEXT NOT NULL, phone TEXT NOT NULL, status TEXT NOT NULL,
+         source TEXT NOT NULL, evidence TEXT DEFAULT '',
+         disclosure_version TEXT DEFAULT 'v1', captured_by TEXT DEFAULT '',
+         captured_at DOUBLE PRECISION, created DOUBLE PRECISION,
+         updated DOUBLE PRECISION, UNIQUE(candidate_id, phone_key)
+       )""",
+    """CREATE TABLE IF NOT EXISTS sms_conversations(
+         id BIGSERIAL PRIMARY KEY, candidate_id BIGINT NOT NULL,
+         nexus_candidate_id TEXT DEFAULT '', candidate_name TEXT DEFAULT '',
+         candidate_phone TEXT NOT NULL, phone_key TEXT NOT NULL,
+         initiated_by TEXT DEFAULT '', assigned_recruiter_id TEXT DEFAULT '',
+         assigned_recruiter_email TEXT DEFAULT '', assigned_recruiter_name TEXT DEFAULT '',
+         zoom_sender_number TEXT DEFAULT '', zoom_session_id TEXT DEFAULT '',
+         status TEXT DEFAULT 'open', created DOUBLE PRECISION,
+         updated DOUBLE PRECISION, last_message_at DOUBLE PRECISION
+       )""",
+    """CREATE TABLE IF NOT EXISTS sms_messages(
+         id BIGSERIAL PRIMARY KEY, conversation_id BIGINT NOT NULL,
+         direction TEXT NOT NULL, body TEXT NOT NULL, status TEXT DEFAULT 'queued',
+         zoom_message_id TEXT DEFAULT '', request_id TEXT UNIQUE,
+         failure_reason TEXT DEFAULT '', created DOUBLE PRECISION,
+         updated DOUBLE PRECISION
+       )""",
+    """CREATE TABLE IF NOT EXISTS sms_webhook_events(
+         event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
+         created DOUBLE PRECISION
+       )""",
     # Older deployments may already contain one or more of these tables from
     # before candidate-level attribution was added. CREATE TABLE IF NOT EXISTS
     # does not evolve an existing table, so repair every candidate-bearing
@@ -305,6 +361,12 @@ _POSTGRES_SCHEMA = (
     "ON nexus_deliveries(identity_key) WHERE status IN ('processing','writing')",
     "CREATE INDEX IF NOT EXISTS idx_watcher_email_delivery_status "
     "ON watcher_email_deliveries(status, lease_until)",
+    "CREATE INDEX IF NOT EXISTS idx_sms_conversations_candidate "
+    "ON sms_conversations(candidate_id, updated)",
+    "CREATE INDEX IF NOT EXISTS idx_sms_conversations_session "
+    "ON sms_conversations(zoom_session_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sms_messages_conversation "
+    "ON sms_messages(conversation_id, created)",
 )
 
 _POSTGRES_SCHEMA_READY = False
@@ -330,6 +392,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "provider_lookups", "lookup_runs", "lookup_run_items",
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
+    "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
     "enrichment_events": ("candidate_id",),
@@ -363,6 +426,8 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_lookup_run_items_run", "idx_nexus_deliveries_ready",
     "idx_nexus_one_processing_identity", "idx_nexus_one_active_identity",
     "idx_watcher_email_delivery_status",
+    "idx_sms_conversations_candidate", "idx_sms_conversations_session",
+    "idx_sms_messages_conversation",
 )
 
 
@@ -2474,6 +2539,255 @@ def mark_outreach(outreach_id, status):
             "UPDATE outreach SET status=? WHERE id=?", (status, outreach_id)
         )
         return cursor.rowcount > 0
+
+
+# ---- consent-gated SMS conversations ----
+def record_sms_consent(candidate_id, phone, status, source, evidence,
+                       captured_by="", disclosure_version="v1"):
+    normalized_status = str(status or "").strip().casefold()
+    if normalized_status not in {"opted_in", "opted_out"}:
+        raise ValueError("SMS consent status must be opted_in or opted_out")
+    phone_value = str(phone or "").strip()
+    key = contact_key(phone_value)
+    if not key:
+        raise ValueError("A valid phone number is required")
+    source_value = str(source or "").strip().casefold()
+    if source_value not in {"application", "talent_pool", "inbound_sms", "verbal", "written"}:
+        raise ValueError("A documented consent source is required")
+    evidence_value = str(evidence or "").strip()
+    if not evidence_value:
+        raise ValueError("Consent evidence is required")
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO sms_consents(
+                 candidate_id,phone_key,phone,status,source,evidence,
+                 disclosure_version,captured_by,captured_at,created,updated
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(candidate_id,phone_key) DO UPDATE SET
+                 phone=excluded.phone,status=excluded.status,source=excluded.source,
+                 evidence=excluded.evidence,disclosure_version=excluded.disclosure_version,
+                 captured_by=excluded.captured_by,captured_at=excluded.captured_at,
+                 updated=excluded.updated""",
+            (
+                int(candidate_id), key, phone_value, normalized_status, source_value,
+                evidence_value[:2000], str(disclosure_version or "v1")[:100],
+                str(captured_by or "")[:320], now, now, now,
+            ),
+        )
+        if normalized_status == "opted_out":
+            connection.execute(
+                """INSERT INTO dnc(value,reason,created) VALUES(?,?,?)
+                   ON CONFLICT(value) DO NOTHING""",
+                (key, "SMS opt-out", now),
+            )
+        row = connection.execute(
+            "SELECT * FROM sms_consents WHERE candidate_id=? AND phone_key=?",
+            (int(candidate_id), key),
+        ).fetchone()
+        return dict(row)
+
+
+def get_sms_consent(candidate_id, phone):
+    key = contact_key(phone)
+    if not key:
+        return None
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM sms_consents WHERE candidate_id=? AND phone_key=?",
+            (int(candidate_id), key),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def candidate_nexus_id(candidate_id):
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT nexus_candidate_id FROM nexus_candidate_links
+               WHERE candidate_id=? ORDER BY updated DESC LIMIT 1""",
+            (int(candidate_id),),
+        ).fetchone()
+        return str(row["nexus_candidate_id"] or "") if row else ""
+
+
+def get_or_create_sms_conversation(candidate_id, phone, *, candidate_name="",
+                                   initiated_by="", sender_number=""):
+    phone_value = str(phone or "").strip()
+    key = contact_key(phone_value)
+    now = time.time()
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT * FROM sms_conversations
+               WHERE candidate_id=? AND phone_key=? AND status NOT IN ('closed','opted_out')
+               ORDER BY updated DESC LIMIT 1""",
+            (int(candidate_id), key),
+        ).fetchone()
+        if row:
+            return dict(row)
+        conversation_id = _insert_id(
+            connection,
+            """INSERT INTO sms_conversations(
+                 candidate_id,nexus_candidate_id,candidate_name,candidate_phone,phone_key,
+                 initiated_by,zoom_sender_number,status,created,updated,last_message_at
+               ) VALUES(?,?,?,?,?,?,?,'open',?,?,?)""",
+            (
+                int(candidate_id), candidate_nexus_id(candidate_id),
+                str(candidate_name or "")[:320], phone_value, key,
+                str(initiated_by or "")[:320], str(sender_number or "")[:50],
+                now, now, now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM sms_conversations WHERE id=?", (conversation_id,)
+        ).fetchone()
+        return dict(row)
+
+
+def create_sms_message(conversation_id, direction, body, request_id="", status="queued"):
+    now = time.time()
+    request_key = str(request_id or "").strip() or None
+    with _conn() as connection:
+        if request_key:
+            row = connection.execute(
+                "SELECT * FROM sms_messages WHERE request_id=?", (request_key,)
+            ).fetchone()
+            if row:
+                return dict(row), False
+        message_id = _insert_id(
+            connection,
+            """INSERT INTO sms_messages(
+                 conversation_id,direction,body,status,request_id,created,updated
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                int(conversation_id), str(direction), str(body), str(status),
+                request_key, now, now,
+            ),
+        )
+        connection.execute(
+            "UPDATE sms_conversations SET updated=?,last_message_at=? WHERE id=?",
+            (now, now, int(conversation_id)),
+        )
+        row = connection.execute("SELECT * FROM sms_messages WHERE id=?", (message_id,)).fetchone()
+        return dict(row), True
+
+
+def update_sms_message(message_id, *, status, zoom_message_id="", failure_reason=""):
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE sms_messages SET status=?,zoom_message_id=?,failure_reason=?,updated=?
+               WHERE id=?""",
+            (str(status), str(zoom_message_id or ""), str(failure_reason or "")[:1000], now, int(message_id)),
+        )
+        row = connection.execute("SELECT * FROM sms_messages WHERE id=?", (int(message_id),)).fetchone()
+        return dict(row) if row else None
+
+
+def update_sms_conversation(conversation_id, **fields):
+    allowed = {
+        "zoom_session_id", "status", "assigned_recruiter_id",
+        "assigned_recruiter_email", "assigned_recruiter_name",
+    }
+    values = {key: str(value or "") for key, value in fields.items() if key in allowed}
+    if not values:
+        return get_sms_conversation(conversation_id)
+    values["updated"] = time.time()
+    clause = ",".join(f"{key}=?" for key in values)
+    with _conn() as connection:
+        connection.execute(
+            f"UPDATE sms_conversations SET {clause} WHERE id=?",
+            (*values.values(), int(conversation_id)),
+        )
+    return get_sms_conversation(conversation_id)
+
+
+def get_sms_conversation(conversation_id):
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM sms_conversations WHERE id=?", (int(conversation_id),)
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["messages"] = [dict(item) for item in connection.execute(
+            "SELECT * FROM sms_messages WHERE conversation_id=? ORDER BY created",
+            (int(conversation_id),),
+        )]
+        return result
+
+
+def list_sms_conversations(user_id="", *, include_all=False):
+    with _conn() as connection:
+        if include_all or not user_id:
+            rows = connection.execute(
+                "SELECT * FROM sms_conversations ORDER BY updated DESC"
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """SELECT * FROM sms_conversations
+                   WHERE initiated_by=? OR assigned_recruiter_id=?
+                   ORDER BY updated DESC""",
+                (str(user_id), str(user_id)),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def claim_sms_webhook(event_key, event_type):
+    with _conn() as connection:
+        cursor = connection.execute(
+            """INSERT INTO sms_webhook_events(event_key,event_type,created)
+               VALUES(?,?,?) ON CONFLICT(event_key) DO NOTHING""",
+            (str(event_key), str(event_type), time.time()),
+        )
+        return cursor.rowcount > 0
+
+
+def find_sms_conversation(*, session_id="", phone=""):
+    with _conn() as connection:
+        if session_id:
+            row = connection.execute(
+                """SELECT * FROM sms_conversations WHERE zoom_session_id=?
+                   ORDER BY updated DESC LIMIT 1""", (str(session_id),)
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """SELECT * FROM sms_conversations WHERE phone_key=?
+                   ORDER BY updated DESC LIMIT 1""", (contact_key(phone),)
+            ).fetchone()
+        return dict(row) if row else None
+
+
+def reconcile_outbound_sms(conversation_id, *, zoom_message_id="", status="sent",
+                           failure_reason=""):
+    now = time.time()
+    with _conn() as connection:
+        row = None
+        if zoom_message_id:
+            row = connection.execute(
+                "SELECT * FROM sms_messages WHERE zoom_message_id=? LIMIT 1",
+                (str(zoom_message_id),),
+            ).fetchone()
+        if not row:
+            row = connection.execute(
+                """SELECT * FROM sms_messages
+                   WHERE conversation_id=? AND direction='outbound'
+                   ORDER BY created DESC LIMIT 1""",
+                (int(conversation_id),),
+            ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            """UPDATE sms_messages SET status=?,zoom_message_id=?,failure_reason=?,updated=?
+               WHERE id=?""",
+            (
+                str(status), str(zoom_message_id or row["zoom_message_id"] or ""),
+                str(failure_reason or "")[:1000], now, int(row["id"]),
+            ),
+        )
+        result = connection.execute(
+            "SELECT * FROM sms_messages WHERE id=?", (int(row["id"]),)
+        ).fetchone()
+        return dict(result)
 
 
 # ---- watcher email delivery claims ----

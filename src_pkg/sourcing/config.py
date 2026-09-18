@@ -103,6 +103,44 @@ HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )
 
+# Zoom Phone SMS is a server-side integration. Credentials are never shipped
+# in the browser extension. Sending remains disabled until every required
+# value is present and the operator explicitly enables it.
+ZOOM_SMS_ENABLED_REQUESTED = os.getenv("ZOOM_SMS_ENABLED", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+ZOOM_ACCOUNT_ID = os.getenv("ZOOM_ACCOUNT_ID", "").strip()
+ZOOM_CLIENT_ID = os.getenv("ZOOM_CLIENT_ID", "").strip()
+ZOOM_CLIENT_SECRET = os.getenv("ZOOM_CLIENT_SECRET", "").strip()
+ZOOM_SMS_SENDER_USER_ID = os.getenv("ZOOM_SMS_SENDER_USER_ID", "").strip()
+ZOOM_SMS_SENDER_NUMBER = os.getenv("ZOOM_SMS_SENDER_NUMBER", "").strip()
+ZOOM_WEBHOOK_SECRET_TOKEN = os.getenv("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
+ZOOM_API_BASE_URL = os.getenv("ZOOM_API_BASE_URL", "https://api.zoom.us/v2").strip().rstrip("/")
+ZOOM_OAUTH_URL = os.getenv("ZOOM_OAUTH_URL", "https://zoom.us/oauth/token").strip()
+ZOOM_SMS_TIMEOUT = max(3.0, min(60.0, float(os.getenv("ZOOM_SMS_TIMEOUT", "20"))))
+ZOOM_SMS_ENABLED = bool(
+    ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
+    and ZOOM_CLIENT_SECRET and ZOOM_SMS_SENDER_USER_ID and ZOOM_SMS_SENDER_NUMBER
+)
+# Development-only consent bypass. It is deliberately restricted to an
+# explicit phone-number allowlist so this cannot become an unrestricted
+# production outreach switch.
+ZOOM_SMS_TEST_MODE = os.getenv("ZOOM_SMS_TEST_MODE", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+ZOOM_SMS_TEST_NUMBERS = tuple(dict.fromkeys(
+    value.strip()
+    for value in os.getenv("ZOOM_SMS_TEST_NUMBERS", "").split(",")
+    if value.strip()
+))
+
+# Shared server-to-server credential used only for Medhunt webhook activity
+# reporting. User-initiated HealthBoard calls continue to use the user's opaque
+# extension token.
+MEDHUNT_HEALTHBOARD_SERVICE_TOKEN = os.getenv(
+    "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", ""
+).strip()
+
 # Hosted browser clients must be explicitly allowlisted once Chrome assigns
 # the production extension ID. Local development keeps the broad extension
 # origin rule unless the operator opts into strict mode.
