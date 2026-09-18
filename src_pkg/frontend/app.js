@@ -3843,6 +3843,7 @@ async function showSmsComposer(candidateId, candidateName, phone) {
   ]);
   const consent = consentResult.consent;
   const testModeBypass = consentResult.test_mode_bypass === true;
+  const optInPending = consentResult.opt_in_pending === true;
   const permitted = consent?.status === "opted_in" || testModeBypass;
   const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
   const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
@@ -3854,8 +3855,9 @@ async function showSmsComposer(candidateId, candidateName, phone) {
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
       ${testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(consent.source)}</div>` : `
         <div class="sms-consent-panel">
-          <strong>Record documented SMS permission</strong>
-          <p class="muted small">Select the source where this candidate agreed to receive recruiting texts. Public profile data alone is not permission.</p>
+          <strong>${optInPending ? "Waiting for candidate opt-in" : "SMS permission required"}</strong>
+          <p class="muted small">${optInPending ? "The opt-in request was sent. The recruiting message unlocks automatically after the candidate replies START or YES." : "Send a neutral opt-in request, or record permission already obtained elsewhere. Public profile data alone is not permission."}</p>
+          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending ? "" : " disabled"}>${optInPending ? "Opt-in request sent" : "Request opt-in with Zoom Phone"}</button>
           <label class="field-label" for="smsConsentSource">Permission source</label>
           <select id="smsConsentSource">
             <option value="application">Job application</option>
@@ -3904,6 +3906,24 @@ async function recordSmsConsent() {
     }),
   });
   notify("SMS permission record saved.");
+  await showSmsComposer(
+    activeSmsContext.candidateId, activeSmsContext.candidateName, activeSmsContext.phone,
+  );
+}
+
+async function requestSmsOptIn() {
+  if (!activeSmsContext) throw new Error("Candidate message context expired.");
+  await api("/messaging/sms/opt-in-request", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidate_id: activeSmsContext.candidateId,
+      phone: activeSmsContext.phone,
+      request_id: crypto.randomUUID(),
+    }),
+    timeout: 60000,
+  });
+  notify("Opt-in request accepted by Zoom Phone.");
   await showSmsComposer(
     activeSmsContext.candidateId, activeSmsContext.candidateName, activeSmsContext.phone,
   );
@@ -4232,6 +4252,7 @@ document.addEventListener("click", async (event) => {
     "draft": () => draftOutreach(id),
     "compose-sms": () => composeSmsFromButton(button),
     "record-sms-consent": recordSmsConsent,
+    "request-sms-opt-in": requestSmsOptIn,
     "send-sms": sendCandidateSms,
     "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
     "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),

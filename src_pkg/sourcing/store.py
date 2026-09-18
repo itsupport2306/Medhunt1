@@ -2581,6 +2581,10 @@ def record_sms_consent(candidate_id, phone, status, source, evidence,
                    ON CONFLICT(value) DO NOTHING""",
                 (key, "SMS opt-out", now),
             )
+        elif source_value == "inbound_sms" and str(captured_by or "") == "zoom":
+            # Only an authenticated inbound carrier event may reverse a prior
+            # SMS suppression. Manually entered records never clear DNC.
+            connection.execute("DELETE FROM dnc WHERE value=?", (key,))
         row = connection.execute(
             "SELECT * FROM sms_consents WHERE candidate_id=? AND phone_key=?",
             (int(candidate_id), key),

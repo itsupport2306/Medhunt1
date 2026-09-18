@@ -3260,7 +3260,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.26.3"
+            assert health_body["version"] == "3.26.4"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3728,7 +3728,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.26.3"
+    assert manifest["version"] == "3.26.4"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -4408,5 +4408,78 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
             })
             assert blocked.status_code == 409
             assert len(calls) == 1
+
+    asyncio.run(exercise())
+
+
+def test_zoom_sms_opt_in_request_unlocks_outreach_after_start_reply(monkeypatch):
+    store.reset()
+    candidate_id = store.add_candidate("Morgan Clinician", "Seattle, WA", source="medifind")
+    quick_sourcer_client.apply_to_candidate(candidate_id, {
+        "status": "found", "name": "Morgan Clinician", "source": "test fixture",
+        "emails": [], "phones": [{"value": "+12065550123", "type": "Wireless"}],
+        "addresses": ["Seattle, WA"],
+    })
+    monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+12065550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
+    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
+    monkeypatch.setattr(config, "ZOOM_WEBHOOK_SECRET_TOKEN", "webhook-secret")
+    sent_messages = []
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+        sent_messages.append((phone, message)) or {
+            "message_id": f"zoom-{len(sent_messages)}", "session_id": "zoom-opt-in-session",
+        }
+    ))
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            request_result = await client.post("/messaging/sms/opt-in-request", json={
+                "candidate_id": candidate_id, "phone": "+12065550123",
+                "request_id": "opt-in-request-1",
+            })
+            assert request_result.status_code == 200, request_result.text
+            assert request_result.json()["conversation"]["status"] == "awaiting_opt_in"
+            assert "Reply START" in sent_messages[0][1]
+            assert "Reply STOP" in sent_messages[0][1]
+
+            pitch_before_opt_in = await client.post("/messaging/sms", json={
+                "candidate_id": candidate_id, "phone": "+12065550123",
+                "message": "Are you open to a role?", "request_id": "pitch-before-opt-in",
+            })
+            assert pitch_before_opt_in.status_code == 409
+
+            incoming = {
+                "event": "phone.sms_received", "event_ts": int(time.time() * 1000),
+                "payload": {"object": {
+                    "message_id": "zoom-inbound-start", "session_id": "zoom-opt-in-session",
+                    "message": "START", "sender": {"phone_number": "+12065550123"},
+                    "to_members": [{"phone_number": "+12065550999"}],
+                }},
+            }
+            raw = json.dumps(incoming, separators=(",", ":")).encode()
+            timestamp = str(int(time.time()))
+            signature = "v0=" + hmac.new(
+                b"webhook-secret", b"v0:" + timestamp.encode() + b":" + raw,
+                hashlib.sha256,
+            ).hexdigest()
+            webhook = await client.post(
+                "/integrations/zoom/webhook", content=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "x-zm-request-timestamp": timestamp,
+                    "x-zm-signature": signature,
+                },
+            )
+            assert webhook.status_code == 200, webhook.text
+            assert store.get_sms_consent(candidate_id, "+12065550123")["status"] == "opted_in"
+
+            pitch = await client.post("/messaging/sms", json={
+                "candidate_id": candidate_id, "phone": "+12065550123",
+                "message": "Are you open to a role?", "request_id": "pitch-after-opt-in",
+            })
+            assert pitch.status_code == 200, pitch.text
+            assert len(sent_messages) == 2
 
     asyncio.run(exercise())
