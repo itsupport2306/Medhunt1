@@ -174,6 +174,7 @@ let indeedResultFilter = "all";
 let indeedLookupScope = new Set();
 let indeedLookupProfiles = [];
 let indeedAutoScanTimer = null;
+let indeedProgressRefreshTimer = null;
 let indeedLookupInProgress = false;
 let indeedResumeBatchState = {
   active: false,
@@ -2100,9 +2101,9 @@ function indeedPanelHeader() {
   const serviceState = progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline");
   return `
     <header class="source-shell-header panel-brand${progress ? " is-busy" : ""}" data-testid="source-header" data-progress-kind="${progress?.kind || "none"}" aria-busy="${progress ? "true" : "false"}">
-      <img class="medhunt-mark" src="icons/medhunt-mark.png" alt="" aria-hidden="true">
+      <img class="medhunt-mark" src="icons/medhunt-logo.png" alt="Med Hunt">
       <div class="source-brand-copy">
-        <strong>Medhunt</strong>
+        <strong class="sr-only">Medhunt</strong>
         <span id="sourceHeaderStatus">${escapeHtml(serviceState)}</span>
       </div>
       <div class="source-header-actions">
@@ -2848,6 +2849,21 @@ if (IS_EXTENSION) {
       };
       if (!$(".scan-view")) renderIndeedScanning();
       updateSourceHeaderProgressUi();
+      // Some directory pages finish their progressive scan before the side
+      // panel receives the final response. Refresh from the page snapshot as
+      // soon as the reported total is reached so results do not require a
+      // panel close/reopen cycle.
+      if (
+        Number(message.total) > 0
+        && Number(message.found) >= Number(message.total)
+        && !indeedLookupInProgress
+      ) {
+        clearTimeout(indeedProgressRefreshTimer);
+        indeedProgressRefreshTimer = setTimeout(() => {
+          indeedProgressRefreshTimer = null;
+          scanIndeedCandidates({ quiet: true, preserveSelection: true });
+        }, 250);
+      }
       return false;
     }
     if (message?.type !== "RADIXSOL_PLATFORM_RESULTS_CHANGED") return false;

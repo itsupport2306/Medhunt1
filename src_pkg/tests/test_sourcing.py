@@ -3260,7 +3260,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.26.2"
+            assert health_body["version"] == "3.26.3"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3728,7 +3728,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.26.2"
+    assert manifest["version"] == "3.26.3"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()

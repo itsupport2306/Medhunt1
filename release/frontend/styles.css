@@ -1097,7 +1097,7 @@ body.extension-shell .indeed-workflow {
   flex: 0 0 68px;
   min-height: 68px;
   display: grid;
-  grid-template-columns: 42px minmax(92px, 1fr) auto;
+  grid-template-columns: 112px minmax(72px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 9px 12px 12px;
@@ -1107,12 +1107,12 @@ body.extension-shell .indeed-workflow {
 }
 
 .medhunt-mark {
-  width: 40px;
-  height: 40px;
+  width: 108px;
+  height: 48px;
   display: block;
   box-sizing: border-box;
   object-fit: contain;
-  padding: 2px;
+  padding: 1px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, .55);
   border-radius: 10px;
@@ -1133,7 +1133,7 @@ body.extension-shell .indeed-workflow {
   white-space: nowrap;
 }
 .source-brand-copy span {
-  margin-top: 2px;
+  margin-top: 0;
   color: #a9c3d4;
   font-size: 11px;
 }
@@ -1641,11 +1641,11 @@ body.extension-shell .indeed-candidate-list {
 
 @media (max-width: 359px) {
   .source-shell-header.panel-brand {
-    grid-template-columns: 38px minmax(72px, 1fr) auto;
+    grid-template-columns: 92px minmax(60px, 1fr) auto;
     gap: 8px;
     padding-inline: 10px;
   }
-  .medhunt-mark { width: 36px; height: 36px; }
+  .medhunt-mark { width: 88px; height: 42px; }
   .source-brand-copy strong { font-size: 13px; }
   .source-brand-copy span { font-size: 10px; }
   .source-shell-header .active-page-indicator { max-width: 76px; padding-inline: 7px; }
