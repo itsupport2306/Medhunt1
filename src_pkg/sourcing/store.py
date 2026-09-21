@@ -2489,6 +2489,23 @@ def list_resumes(candidate_id):
         ]
 
 
+def list_candidates_without_resumes(limit=100):
+    """Return recently enriched candidates that have no stored resume."""
+    bounded_limit = max(1, min(500, int(limit or 100)))
+    with _conn() as connection:
+        rows = connection.execute(
+            """SELECT c.* FROM candidates c
+               WHERE c.enrich_status='success'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM resumes r WHERE r.candidate_id=c.id
+                 )
+               ORDER BY c.updated DESC,c.id DESC
+               LIMIT ?""",
+            (bounded_limit,),
+        ).fetchall()
+    return [_row(row) for row in rows]
+
+
 def get_resume_by_checksum(candidate_id, checksum_sha256):
     checksum = str(checksum_sha256 or "").strip().lower()
     if not checksum:

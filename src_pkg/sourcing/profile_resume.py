@@ -40,6 +40,7 @@ def normalized_profile(candidate: dict, profile: dict) -> dict:
         "source_label": _text(profile.get("source_label"), 100) or "Public professional directory",
         "source_url": _text(profile.get("source_url"), 2000),
         "summary": _text(profile.get("summary"), 4000),
+        "experience": _values(profile.get("experience"), limit=40),
         "credentials": _values(profile.get("credentials"), limit=12, max_chars=40),
         "specialties": _values(profile.get("specialties"), limit=20),
         "subspecialties": _values(profile.get("subspecialties"), limit=20),
@@ -51,6 +52,81 @@ def normalized_profile(candidate: dict, profile: dict) -> dict:
         "years_experience": _text(profile.get("years_experience"), 60),
         "npi": re.sub(r"\D", "", str(profile.get("npi") or ""))[:10],
         "address": _text(profile.get("address"), 500),
+    }
+
+
+def from_stored_candidate(candidate: dict) -> dict | None:
+    """Build a bounded, attributed profile from facts already in Medhunt.
+
+    Older extension releases save Indeed result-card facts before contact
+    lookup, but wait until the full lookup batch completes before attempting
+    browser-only resume capture.  The backend can safely turn those stored
+    facts into a transparent public-profile PDF without impersonating a
+    candidate-authored resume.
+    """
+    source = _text(candidate.get("source"), 50).casefold()
+    labels = {
+        "indeed": "Indeed public professional profile",
+        "linkedin": "LinkedIn public professional profile",
+        "usnews": "U.S. News Doctor Finder",
+        "medifind": "MediFind",
+        "commonspirit": "CommonSpirit Health",
+        "sharecare": "Sharecare",
+    }
+    source_label = labels.get(source)
+    if not source_label:
+        return None
+
+    evidence: dict[str, list[str]] = {
+        "headline": [], "role": [], "employer": [], "school": [],
+        "specialty": [],
+    }
+    for raw_line in str(candidate.get("notes") or "").splitlines():
+        line = " ".join(raw_line.split())
+        if ":" not in line:
+            continue
+        label, value = line.split(":", 1)
+        key = label.strip().casefold()
+        cleaned = _text(value, 500)
+        if key in evidence and cleaned:
+            if cleaned.casefold() not in {item.casefold() for item in evidence[key]}:
+                evidence[key].append(cleaned)
+
+    headline = (evidence["headline"] or evidence["role"] or [""])[0]
+    experience: list[str] = []
+    roles = evidence["role"]
+    employers = evidence["employer"]
+    for index in range(max(len(roles), len(employers))):
+        role = roles[index] if index < len(roles) else ""
+        employer = employers[index] if index < len(employers) else ""
+        value = " — ".join(item for item in (role, employer) if item)
+        if value and value.casefold() not in {item.casefold() for item in experience}:
+            experience.append(value)
+
+    if not any((headline, experience, evidence["school"], evidence["specialty"])):
+        return None
+    return {
+        "kind": "public_professional_profile",
+        "source_label": source_label,
+        "source_url": _text(candidate.get("source_url"), 2000),
+        "location": _text(candidate.get("location"), 300),
+        "headline": headline,
+        "summary": (
+            "Professional information captured by Medhunt from the public "
+            f"{source_label} listing."
+        ),
+        "experience": experience,
+        "specialties": evidence["specialty"],
+        "education": evidence["school"],
+        "credentials": [],
+        "subspecialties": [],
+        "hospitals": [],
+        "certifications": [],
+        "licenses": [],
+        "languages": [],
+        "years_experience": "",
+        "npi": "",
+        "address": "",
     }
 
 
@@ -165,6 +241,7 @@ def render(candidate: dict, profile: dict) -> bytes:
             story.append(Paragraph(f"•&nbsp;&nbsp;{escape(value)}", item))
 
     add_section("Professional Summary", paragraph=data["summary"])
+    add_section("Professional Experience", data["experience"])
     expertise = [*data["specialties"], *[f"Subspecialty: {value}" for value in data["subspecialties"]]]
     add_section("Clinical Expertise", expertise)
     add_section("Hospital Affiliations", data["hospitals"])
@@ -202,4 +279,7 @@ def render(candidate: dict, profile: dict) -> bytes:
     return rendered
 
 
-__all__ = ["filename", "fingerprint", "normalized_profile", "render"]
+__all__ = [
+    "filename", "fingerprint", "from_stored_candidate", "normalized_profile",
+    "render",
+]

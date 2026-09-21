@@ -54,8 +54,7 @@ def queue_latest_resume_if_ready(candidate_id: int) -> dict | None:
     projected = contact_access.project_candidate(candidate)
     if not (
         projected.get("contacts_trusted") is True
-        and projected.get("emails")
-        and projected.get("phones")
+        and (projected.get("emails") or projected.get("phones"))
     ):
         return None
     resumes = store.list_resumes(int(candidate_id))

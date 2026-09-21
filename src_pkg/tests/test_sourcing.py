@@ -3664,6 +3664,72 @@ def test_profile_resume_fingerprint_changes_with_public_credentials():
     assert profile_resume.filename(candidate, profile).endswith(f"{first[:12]}.pdf")
 
 
+def test_backend_generates_attributed_indeed_profile_resume(monkeypatch):
+    from pypdf import PdfReader
+
+    store.reset()
+    candidate_id = store.add_candidate(
+        "Jane Clinician", "Boston, MA", source="indeed",
+        source_url="https://www.indeed.com/r/jane-clinician/fixture",
+        notes=(
+            "Headline: Registered Nurse at Example Medical Center\n"
+            "Role: Registered Nurse\n"
+            "Employer: Example Medical Center\n"
+            "School: Example University\n"
+            "Specialty: Intensive Care"
+        ),
+    )
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(config, "STORAGE_ENABLED", False)
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", False)
+    monkeypatch.setattr(
+        api_module.contact_access,
+        "project_candidate",
+        lambda source: {
+            **source,
+            "contacts_trusted": True,
+            "emails": ["jane@example.test"],
+            "phones": [],
+        },
+    )
+
+    result = api_module._ensure_stored_profile_resume(candidate_id)
+
+    assert result["status"] == "created"
+    resumes = store.list_resumes(candidate_id)
+    assert len(resumes) == 1
+    pdf = store.get_resume(candidate_id, resumes[0]["id"])["data"]
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(pdf)).pages)
+    assert "PROFESSIONAL EXPERIENCE" in text
+    assert "Example Medical Center" in text
+    assert "EDUCATION & TRAINING" in text
+    assert "not candidate-authored" in text
+
+
+def test_backend_profile_resume_requires_trusted_contact(monkeypatch):
+    store.reset()
+    candidate_id = store.add_candidate(
+        "Jane Clinician", "Boston, MA", source="indeed",
+        notes="Role: Registered Nurse",
+    )
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(
+        api_module.contact_access,
+        "project_candidate",
+        lambda source: {
+            **source,
+            "contacts_trusted": False,
+            "emails": [],
+            "phones": [],
+        },
+    )
+
+    result = api_module._ensure_stored_profile_resume(candidate_id)
+
+    assert result["status"] == "contact_not_ready"
+    assert store.list_resumes(candidate_id) == []
+
+
 def test_cloud_resume_api_stores_r2_metadata(monkeypatch):
     store.reset()
     candidate_id = store.add_candidate("Cloud Resume", "Atlanta, GA", source="indeed")
