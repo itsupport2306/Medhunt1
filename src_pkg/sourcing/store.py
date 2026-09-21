@@ -309,15 +309,6 @@ _POSTGRES_SCHEMA = (
     # table before creating indexes or serving requests. Keep the added columns
     # nullable so historical rows are preserved; all current writes supply the
     # candidate id.
-    # The original analytics table was deployed with only a subset of the
-    # identity columns. Add the complete user identity shape lazily; these
-    # operations are idempotent and do not rewrite historical rows.
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth0_sub TEXT",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT DEFAULT ''",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS name TEXT DEFAULT ''",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS created DOUBLE PRECISION",
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS updated DOUBLE PRECISION",
-    "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS auth0_sub TEXT",
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
@@ -351,7 +342,6 @@ _POSTGRES_SCHEMA = (
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS checksum_sha256 TEXT DEFAULT ''",
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS etag TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_candidates_source ON candidates(source, source_id)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_user ON enrichment_events(auth0_sub, created)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_candidate ON enrichment_events(candidate_id, created)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_provider_person ON candidates(provider_person_id)",
@@ -405,8 +395,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
-    "users": ("auth0_sub", "email", "name", "created", "updated"),
-    "enrichment_events": ("auth0_sub", "candidate_id"),
+    "enrichment_events": ("candidate_id",),
     "outreach": ("candidate_id",),
     "talent_pool_members": ("candidate_id",),
     "campaign_members": ("candidate_id",),
@@ -429,7 +418,7 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "nexus_deliveries": ("candidate_id",),
 }
 _POSTGRES_REQUIRED_INDEXES = (
-    "idx_users_auth0_sub", "idx_enrichment_events_user", "idx_enrichment_events_candidate",
+    "idx_enrichment_events_user", "idx_enrichment_events_candidate",
     "idx_candidates_source", "idx_candidates_provider_person",
     "idx_candidates_master", "idx_pool_members_candidate",
     "idx_campaign_members_candidate", "idx_resumes_candidate",
