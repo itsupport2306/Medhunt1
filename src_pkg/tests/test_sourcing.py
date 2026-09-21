@@ -3260,7 +3260,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.26.4"
+            assert health_body["version"] == "3.26.5"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
