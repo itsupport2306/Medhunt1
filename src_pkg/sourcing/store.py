@@ -309,11 +309,6 @@ _POSTGRES_SCHEMA = (
     # table before creating indexes or serving requests. Keep the added columns
     # nullable so historical rows are preserved; all current writes supply the
     # candidate id.
-    # Older installations also predate the authenticated-user analytics
-    # identity.  Keep this column nullable during migration so existing rows
-    # remain valid; current writes always provide the authenticated subject.
-    "ALTER TABLE users ADD COLUMN IF NOT EXISTS auth0_sub TEXT",
-    "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS auth0_sub TEXT",
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
@@ -347,7 +342,6 @@ _POSTGRES_SCHEMA = (
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS checksum_sha256 TEXT DEFAULT ''",
     "ALTER TABLE resumes ADD COLUMN IF NOT EXISTS etag TEXT DEFAULT ''",
     "CREATE INDEX IF NOT EXISTS idx_candidates_source ON candidates(source, source_id)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_user ON enrichment_events(auth0_sub, created)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_candidate ON enrichment_events(candidate_id, created)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_provider_person ON candidates(provider_person_id)",
@@ -401,8 +395,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
-    "users": ("auth0_sub",),
-    "enrichment_events": ("auth0_sub", "candidate_id"),
+    "enrichment_events": ("candidate_id",),
     "outreach": ("candidate_id",),
     "talent_pool_members": ("candidate_id",),
     "campaign_members": ("candidate_id",),
@@ -425,7 +418,7 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "nexus_deliveries": ("candidate_id",),
 }
 _POSTGRES_REQUIRED_INDEXES = (
-    "idx_users_auth0_sub", "idx_enrichment_events_user", "idx_enrichment_events_candidate",
+    "idx_enrichment_events_user", "idx_enrichment_events_candidate",
     "idx_candidates_source", "idx_candidates_provider_person",
     "idx_candidates_master", "idx_pool_members_candidate",
     "idx_campaign_members_candidate", "idx_resumes_candidate",
@@ -2494,23 +2487,6 @@ def list_resumes(candidate_id):
                 (candidate_id,),
             )
         ]
-
-
-def list_candidates_without_resumes(limit=100):
-    """Return recently enriched candidates that have no stored resume."""
-    bounded_limit = max(1, min(500, int(limit or 100)))
-    with _conn() as connection:
-        rows = connection.execute(
-            """SELECT c.* FROM candidates c
-               WHERE c.enrich_status='success'
-                 AND NOT EXISTS (
-                   SELECT 1 FROM resumes r WHERE r.candidate_id=c.id
-                 )
-               ORDER BY c.updated DESC,c.id DESC
-               LIMIT ?""",
-            (bounded_limit,),
-        ).fetchall()
-    return [_row(row) for row in rows]
 
 
 def get_resume_by_checksum(candidate_id, checksum_sha256):

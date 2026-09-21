@@ -54,7 +54,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.26.5"
+APP_VERSION = "3.26.4"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -280,12 +280,6 @@ class ContactLookupBatchIn(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
     run_id: str = Field(min_length=8, max_length=80)
     confirmed: bool = False
-
-
-class NexusResumeBackfillIn(BaseModel):
-    """Administrator-controlled repair for enriched, resume-less profiles."""
-    limit: int = Field(default=100, ge=1, le=500)
-    dry_run: bool = True
 
 
 class QuickSourcerFindIn(BaseModel):
@@ -844,7 +838,8 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
     nexus_contact_ready = bool(
         config.NEXUS_SYNC_ENABLED
         and contactable.get("contacts_trusted") is True
-        and (contactable.get("phones") or contactable.get("emails"))
+        and contactable.get("phones")
+        and contactable.get("emails")
     )
     data, contact_sheet_embedded = resume_enrichment.add_contact_sheet(
         data, contact_sheet_candidate,
@@ -858,11 +853,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
     nexus_skip_status = (
         "skipped_resume_too_large"
         if nexus_contact_ready and not queue_nexus
-        else (
-            "skipped_contact_not_ready"
-            if config.NEXUS_SYNC_ENABLED and not nexus_contact_ready
-            else "disabled"
-        )
+        else "disabled"
     )
     checksum = hashlib.sha256(data).hexdigest()
     existing = store.get_resume_by_checksum(cid, checksum)
@@ -1275,18 +1266,6 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
                 "phone_contacts": [], "resume_required": False,
                 "location_match": None,
             }
-        if _public_lookup_result(results[str(candidate_id)]).get("status") == "found":
-            try:
-                _ensure_stored_profile_resume(candidate_id)
-            except Exception as exc:
-                # A generated profile is follow-up work. Contact enrichment
-                # remains successful even if PDF rendering/storage is briefly
-                # unavailable, and an administrator can backfill it later.
-                logging.getLogger("medhunt.profile_resume").warning(
-                    "Backend profile resume was deferred for candidate %s (%s).",
-                    candidate_id,
-                    type(exc).__name__,
-                )
         try:
             nexus_delivery.queue_latest_resume_if_ready(candidate_id)
         except Exception as exc:
@@ -1318,47 +1297,6 @@ def contact_lookup_batch(body: ContactLookupBatchIn, request: Request = None):
             provider="quick_sourcer", run_id=body.run_id,
         )
     return result
-
-
-@app.post("/admin/nexus/backfill-resumes")
-def backfill_nexus_resumes(body: NexusResumeBackfillIn, request: Request):
-    """Generate attributed PDFs for prior successful extension enrichments."""
-    user = _request_user(request)
-    if healthboard_auth.enabled() and str(user.get("role") or "").casefold() not in {
-        "admin", "owner", "super_admin",
-    }:
-        raise HTTPException(403, "Healthcareboard administrator access is required.")
-
-    candidates = store.list_candidates_without_resumes(body.limit)
-    outcomes: dict[str, int] = {}
-    for candidate in candidates:
-        if body.dry_run:
-            profile = profile_resume.from_stored_candidate(candidate)
-            projected = contact_access.project_candidate(candidate)
-            status = (
-                "eligible"
-                if profile and projected.get("contacts_trusted") is True
-                and (projected.get("emails") or projected.get("phones"))
-                else "not_ready"
-            )
-        else:
-            try:
-                status = str(
-                    _ensure_stored_profile_resume(int(candidate["id"])).get("status")
-                    or "unknown"
-                )
-            except Exception as exc:
-                logging.getLogger("medhunt.profile_resume").warning(
-                    "Backfill failed for candidate %s (%s).",
-                    candidate.get("id"), type(exc).__name__,
-                )
-                status = "failed"
-        outcomes[status] = outcomes.get(status, 0) + 1
-    return {
-        "dry_run": body.dry_run,
-        "examined": len(candidates),
-        "outcomes": outcomes,
-    }
 
 
 @app.post("/enrich/batch")
@@ -1584,46 +1522,6 @@ def conversation(conversation_id: int, request: Request):
     }:
         raise HTTPException(403, "Conversation access denied.")
     return result
-
-
-def _ensure_stored_profile_resume(candidate_id: int) -> dict:
-    """Create an attributed fallback PDF from facts already stored by Medhunt.
-
-    This is intentionally limited to sources whose older extension workflow
-    could finish contact enrichment before its browser-only resume batch ran.
-    It never labels the generated document as candidate-authored.
-    """
-    candidate = store.get_candidate(int(candidate_id))
-    if not candidate:
-        return {"status": "candidate_missing"}
-    existing = store.list_resumes(int(candidate_id))
-    if existing:
-        queued = nexus_delivery.queue_latest_resume_if_ready(int(candidate_id))
-        return {
-            "status": "existing",
-            "resume": existing[0],
-            "nexus_sync_status": queued.get("status") if queued else "not_ready",
-        }
-    if str(candidate.get("source") or "").strip().casefold() not in {"indeed", "linkedin"}:
-        return {"status": "unsupported_source"}
-    profile = profile_resume.from_stored_candidate(candidate)
-    if not profile:
-        return {"status": "insufficient_profile"}
-    projected = contact_access.project_candidate(candidate)
-    if not (
-        projected.get("contacts_trusted") is True
-        and (projected.get("emails") or projected.get("phones"))
-    ):
-        return {"status": "contact_not_ready"}
-    rendered = profile_resume.render(candidate, profile)
-    resume = _store_resume_pdf(
-        int(candidate_id), profile_resume.filename(candidate, profile), rendered,
-    )
-    return {
-        "status": "created",
-        "resume": resume,
-        "nexus_sync_status": resume.get("nexus_sync_status", "pending"),
-    }
 
 
 @app.get("/messaging/recruiters")
