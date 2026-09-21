@@ -535,6 +535,11 @@ def _conn():
                     row_factory=dict_row,
                     autocommit=True,
                     connect_timeout=config.DATABASE_CONNECT_TIMEOUT,
+                    # Neon poolers can reuse a physical connection across
+                    # search_path values. Disable psycopg server-side
+                    # prepared statements so a cached result type from the
+                    # public/Nexus schema cannot conflict with Medhunt.
+                    prepare_threshold=None,
                 )
                 connection = _Connection(raw, postgres=True)
                 _configure_postgres_namespace(connection)
