@@ -38,8 +38,9 @@ def _identity_key(value) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
 
 
-def _request_key(name: str, location: str) -> str:
-    return f"find:{_identity_key(name)}|{_identity_key(location)}"
+def _request_key(name: str, location: str, dedicated_ip: bool = False) -> str:
+    base = f"find:{_identity_key(name)}|{_identity_key(location)}"
+    return f"{base}|pool:dedicated" if dedicated_ip else base
 
 
 def _external_key(external_id) -> str:
@@ -56,6 +57,7 @@ def status() -> dict:
         "enabled": bool(config.QUICK_SOURCER_ENABLED),
         "configured": bool(config.QUICK_SOURCER_API_KEY),
         "base_url": config.QUICK_SOURCER_BASE_URL,
+        "search_pool": "dedicated" if config.QUICK_SOURCER_DEDICATED_IP else "shared",
         "typical_seconds": [30, 90],
     }
 
@@ -293,7 +295,7 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
     return body if isinstance(body, dict) else {}
 
 
-def _failure(exc: Exception) -> dict:
+def _failure(exc: Exception, *, dedicated_ip: bool = False) -> dict:
     if isinstance(exc, PermissionError):
         return _empty("error", str(exc))
     if isinstance(exc, httpx.TimeoutException):
@@ -302,6 +304,11 @@ def _failure(exc: Exception) -> dict:
             "Quick Sourcer did not answer in time. A live search can take 30-90 seconds.",
         )
     if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code == 400 and dedicated_ip:
+            return _empty(
+                "error",
+                "Quick Sourcer dedicated search is unavailable. Mark at least one Hub Search Endpoint as Dedicated.",
+            )
         # The status is the only actionable detail here: a 5xx is the Hub or a
         # source site failing this one search, and it is worth retrying.
         return _empty(
@@ -332,7 +339,8 @@ def _is_person(result: dict, searched_name: str = "") -> bool:
     return bool(returned & set(person_name.identity_tokens(searched_name)))
 
 
-def find(name: str, location: str = "", candidate_id: int = 0, refresh: bool = False) -> dict:
+def find(name: str, location: str = "", candidate_id: int = 0,
+         refresh: bool = False, dedicated_ip: bool | None = None) -> dict:
     """Search Quick Sourcer for one person, reusing a cached record by default."""
     person = _text(name)
     if not person:
@@ -340,15 +348,22 @@ def find(name: str, location: str = "", candidate_id: int = 0, refresh: bool = F
     if not configured():
         return _empty("disabled", "Quick Sourcer is not configured on this backend.")
 
-    request_key = _request_key(person, location)
+    use_dedicated = (
+        config.QUICK_SOURCER_DEDICATED_IP
+        if dedicated_ip is None else bool(dedicated_ip)
+    )
+    request_key = _request_key(person, location, use_dedicated)
     if not refresh:
         hit = _cached(request_key)
         if hit:
             return hit
     try:
-        payload = _call("POST", "/find", {"name": person, "location": _text(location)})
+        request_payload = {"name": person, "location": _text(location)}
+        if use_dedicated:
+            request_payload["dedicated_ip"] = True
+        payload = _call("POST", "/find", request_payload)
     except Exception as exc:
-        return _failure(exc)
+        return _failure(exc, dedicated_ip=use_dedicated)
     result = normalize(payload)
     if not _is_person(result, person):
         return _empty("not_found")

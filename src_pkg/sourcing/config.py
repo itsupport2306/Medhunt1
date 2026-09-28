@@ -295,6 +295,11 @@ QUICK_SOURCER_TIMEOUT = max(10.0, float(os.getenv("QUICK_SOURCER_TIMEOUT", "150"
 QUICK_SOURCER_ENABLED = bool(
     QUICK_SOURCER_BASE_URL and QUICK_SOURCER_API_KEY
 ) and os.getenv("QUICK_SOURCER_ENABLED", "1").strip().lower() in ("1", "true", "yes")
+# The Hub uses its shared search pool when this is disabled. Enable it only
+# after at least one Hub Search Endpoint is marked Dedicated.
+QUICK_SOURCER_DEDICATED_IP = os.getenv(
+    'QUICK_SOURCER_DEDICATED_IP', '0'
+).strip().lower() in ('1', 'true', 'yes')
 # A repeated search costs another 30-90 second browser run, so a found record is
 # reused from the local cache until it expires.
 QUICK_SOURCER_CACHE_TTL_SECONDS = max(
