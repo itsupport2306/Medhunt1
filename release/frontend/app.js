@@ -3836,14 +3836,7 @@ async function copyDraft() {
 async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
   activeSmsContext = { candidateId, candidateName, phone };
-  const [status, consentResult] = await Promise.all([
-    api("/messaging/status"),
-    api(`/candidates/${candidateId}/sms-consent?phone=${encodeURIComponent(phone)}`),
-  ]);
-  const consent = consentResult.consent;
-  const testModeBypass = consentResult.test_mode_bypass === true;
-  const optInPending = consentResult.opt_in_pending === true;
-  const permitted = consent?.status === "opted_in" || testModeBypass;
+  const status = await api("/messaging/status");
   const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
   const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
@@ -3852,29 +3845,12 @@ async function showSmsComposer(candidateId, candidateName, phone) {
       <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
       <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
-      ${testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(consent.source)}</div>` : `
-        <div class="sms-consent-panel">
-          <strong>${optInPending ? "Waiting for candidate opt-in" : "SMS permission required"}</strong>
-          <p class="muted small">${optInPending ? "The opt-in request was sent. The recruiting message unlocks automatically after the candidate replies START or YES." : "Send a neutral opt-in request, or record permission already obtained elsewhere. Public profile data alone is not permission."}</p>
-          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending ? "" : " disabled"}>${optInPending ? "Opt-in request sent" : "Request opt-in with Zoom Phone"}</button>
-          <label class="field-label" for="smsConsentSource">Permission source</label>
-          <select id="smsConsentSource">
-            <option value="application">Job application</option>
-            <option value="talent_pool">Talent-pool signup</option>
-            <option value="written">Written agreement</option>
-            <option value="verbal">Verbal agreement</option>
-            <option value="inbound_sms">Candidate initiated by SMS</option>
-          </select>
-          <label class="field-label" for="smsConsentEvidence">Evidence/reference</label>
-          <textarea id="smsConsentEvidence" rows="3" placeholder="Date, form or record reference"></textarea>
-          <button type="button" class="btn" data-action="record-sms-consent">Save permission record</button>
-        </div>`}
       <label class="field-label" for="smsMessage">Message</label>
-      <textarea id="smsMessage" rows="6" maxlength="420"${permitted ? "" : " disabled"}>${escapeHtml(defaultMessage)}</textarea>
-      <p class="muted small">Medhunt automatically adds its identity and “Reply STOP to opt out” to each message.</p>
+      <textarea id="smsMessage" rows="6" maxlength="420"${status.enabled ? "" : " disabled"}>${escapeHtml(defaultMessage)}</textarea>
+      <p class="muted small">Medhunt automatically adds its identity and ?Reply STOP to opt out? to each message.</p>
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
-        <button type="button" class="btn teal" data-action="send-sms"${permitted && status.enabled ? "" : " disabled"}>Send with Zoom Phone</button>
+        <button type="button" class="btn teal" data-action="send-sms"${status.enabled ? "" : " disabled"}>Send with Zoom Phone</button>
       </div>
     </section>
   </div>`;
@@ -3885,46 +3861,6 @@ async function composeSmsFromButton(button) {
     Number(button.dataset.candidateId),
     button.dataset.candidateName || "Candidate",
     button.dataset.phone || "",
-  );
-}
-
-async function recordSmsConsent() {
-  if (!activeSmsContext) throw new Error("Candidate message context expired.");
-  const source = $("#smsConsentSource")?.value || "";
-  const evidence = $("#smsConsentEvidence")?.value.trim() || "";
-  if (evidence.length < 3) throw new Error("Enter the permission record reference.");
-  await api(`/candidates/${activeSmsContext.candidateId}/sms-consent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      phone: activeSmsContext.phone,
-      status: "opted_in",
-      source,
-      evidence,
-      disclosure_version: "medhunt-sms-v1",
-    }),
-  });
-  notify("SMS permission record saved.");
-  await showSmsComposer(
-    activeSmsContext.candidateId, activeSmsContext.candidateName, activeSmsContext.phone,
-  );
-}
-
-async function requestSmsOptIn() {
-  if (!activeSmsContext) throw new Error("Candidate message context expired.");
-  await api("/messaging/sms/opt-in-request", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      candidate_id: activeSmsContext.candidateId,
-      phone: activeSmsContext.phone,
-      request_id: crypto.randomUUID(),
-    }),
-    timeout: 60000,
-  });
-  notify("Opt-in request accepted by Zoom Phone.");
-  await showSmsComposer(
-    activeSmsContext.candidateId, activeSmsContext.candidateName, activeSmsContext.phone,
   );
 }
 
@@ -4250,8 +4186,6 @@ document.addEventListener("click", async (event) => {
     "move": () => moveCandidate(id),
     "draft": () => draftOutreach(id),
     "compose-sms": () => composeSmsFromButton(button),
-    "record-sms-consent": recordSmsConsent,
-    "request-sms-opt-in": requestSmsOptIn,
     "send-sms": sendCandidateSms,
     "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
     "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),

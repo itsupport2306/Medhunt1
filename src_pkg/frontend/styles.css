@@ -1816,25 +1816,9 @@ body.extension-shell .candidate-queue-card > .linkedin-pdf-tools {
   text-transform: uppercase;
 }
 
-/* ---- consent-gated Zoom Phone messaging ---- */
+/* ---- Zoom Phone messaging ---- */
 .sms-button, .sms-inline { border-color: #9ecfca; color: var(--teal); }
 .sms-inline { margin-top: 5px; }
-.sms-consent-panel {
-  margin: 14px 0;
-  padding: 14px;
-  border: 1px solid #d7e2e8;
-  border-radius: 10px;
-  background: #f7fafb;
-}
-.sms-consent-panel .btn { margin-top: 10px; }
-.sms-consent-state {
-  margin: 12px 0;
-  padding: 9px 11px;
-  border-radius: 8px;
-  font-size: 11px;
-  font-weight: 700;
-}
-.sms-consent-state.ready { color: #086b62; background: #e4f5f2; }
 .conversation-list { display: grid; gap: 8px; margin-top: 14px; }
 .conversation-row {
   width: 100%;

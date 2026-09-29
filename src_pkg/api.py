@@ -54,7 +54,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.26.4"
+APP_VERSION = "3.26.5"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -322,24 +322,10 @@ class OutreachBatchIn(BaseModel):
     channel: str = "email"
 
 
-class SmsConsentIn(BaseModel):
-    phone: str = Field(min_length=7, max_length=50)
-    status: str = Field(pattern=r"^(opted_in|opted_out)$")
-    source: str = Field(pattern=r"^(application|talent_pool|inbound_sms|verbal|written)$")
-    evidence: str = Field(min_length=3, max_length=2000)
-    disclosure_version: str = Field(default="v1", max_length=100)
-
-
 class SmsSendIn(BaseModel):
     candidate_id: int
     phone: str = Field(min_length=7, max_length=50)
     message: str = Field(min_length=1, max_length=420)
-    request_id: str = Field(default="", max_length=100)
-
-
-class SmsOptInRequestIn(BaseModel):
-    candidate_id: int
-    phone: str = Field(min_length=7, max_length=50)
     request_id: str = Field(default="", max_length=100)
 
 
@@ -1304,17 +1290,7 @@ def enrich_batch(job_id: int | None = None):
     raise HTTPException(410, "Use the candidate contact lookup endpoint.")
 
 
-# ---- consent-gated Zoom Phone SMS ----
-def _sms_test_bypass(phone: str) -> bool:
-    if not config.ZOOM_SMS_TEST_MODE or not config.ZOOM_SMS_TEST_NUMBERS:
-        return False
-    requested = store.contact_key(phone)
-    return any(
-        store.contact_key(allowed) == requested
-        for allowed in config.ZOOM_SMS_TEST_NUMBERS
-    )
-
-
+# ---- Zoom Phone SMS ----
 def _candidate_sms_phone(candidate: dict, supplied: str) -> str:
     requested = store.contact_key(supplied)
     projected = contact_access.project_candidate(candidate)
@@ -1336,115 +1312,6 @@ def messaging_status(request: Request):
         "enabled": zoom_sms.enabled(),
         "provider": "zoom_phone",
         "sender_configured": bool(config.ZOOM_SMS_SENDER_NUMBER),
-        "consent_required": True,
-        "test_mode": bool(config.ZOOM_SMS_TEST_MODE),
-    }
-
-
-@app.get("/candidates/{candidate_id}/sms-consent")
-def sms_consent(candidate_id: int, phone: str, request: Request):
-    _request_user(request)
-    candidate = store.get_candidate(candidate_id)
-    if not candidate:
-        raise HTTPException(404, "Candidate not found.")
-    verified_phone = _candidate_sms_phone(candidate, phone)
-    consent = store.get_sms_consent(candidate_id, verified_phone)
-    conversation = store.find_sms_conversation(phone=verified_phone)
-    if conversation and int(conversation.get("candidate_id") or 0) != int(candidate_id):
-        conversation = None
-    return {
-        "consent": consent,
-        "phone": verified_phone,
-        "test_mode_bypass": _sms_test_bypass(verified_phone),
-        "opt_in_pending": bool(
-            conversation and conversation.get("status") == "awaiting_opt_in"
-        ),
-    }
-
-
-@app.post("/candidates/{candidate_id}/sms-consent")
-def save_sms_consent(candidate_id: int, body: SmsConsentIn, request: Request):
-    user = _request_user(request)
-    candidate = store.get_candidate(candidate_id)
-    if not candidate:
-        raise HTTPException(404, "Candidate not found.")
-    verified_phone = _candidate_sms_phone(candidate, body.phone)
-    try:
-        consent = store.record_sms_consent(
-            candidate_id, verified_phone, body.status, body.source, body.evidence,
-            captured_by=str(user.get("sub") or ""),
-            disclosure_version=body.disclosure_version,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    return {"consent": consent}
-
-
-@app.post("/messaging/sms/opt-in-request")
-def request_sms_opt_in(body: SmsOptInRequestIn, request: Request):
-    """Send only the carrier-facing permission request to an unknown number.
-
-    The recruiting pitch remains blocked until a START/YES reply is received
-    or another documented permission source is recorded.
-    """
-    user = _request_user(request)
-    if not zoom_sms.enabled():
-        raise HTTPException(503, "Zoom Phone SMS is not configured.")
-    candidate = store.get_candidate(body.candidate_id)
-    if not candidate:
-        raise HTTPException(404, "Candidate not found.")
-    phone = _candidate_sms_phone(candidate, body.phone)
-    if store.is_dnc(phone):
-        raise HTTPException(409, "This number has opted out and cannot be messaged.")
-    consent = store.get_sms_consent(body.candidate_id, phone)
-    if consent and consent.get("status") == "opted_in":
-        return {"already_opted_in": True, "consent": consent}
-    current = store.find_sms_conversation(phone=phone)
-    if (
-        current
-        and int(current.get("candidate_id") or 0) == int(body.candidate_id)
-        and current.get("status") == "awaiting_opt_in"
-    ):
-        return {
-            "already_pending": True,
-            "conversation": store.get_sms_conversation(current["id"]),
-        }
-    text = (
-        "Medhunt Recruiting: Reply START to agree to receive recruiting text "
-        "messages. Message and data rates may apply. Reply STOP to opt out."
-    )
-    conversation = store.get_or_create_sms_conversation(
-        body.candidate_id, phone,
-        candidate_name=str(candidate.get("name") or ""),
-        initiated_by=str(user.get("sub") or ""),
-        sender_number=config.ZOOM_SMS_SENDER_NUMBER,
-    )
-    request_id = body.request_id.strip() or uuid.uuid4().hex
-    message, created = store.create_sms_message(
-        conversation["id"], "outbound", text, request_id=request_id,
-    )
-    if not created:
-        return {
-            "conversation": store.get_sms_conversation(conversation["id"]),
-            "message": message,
-        }
-    try:
-        result = zoom_sms.send_sms(phone, text)
-        zoom_message_id = str(result.get("message_id") or result.get("id") or "")
-        session_id = str(result.get("session_id") or "")
-        message = store.update_sms_message(
-            message["id"], status="accepted", zoom_message_id=zoom_message_id,
-        )
-        changes = {"status": "awaiting_opt_in"}
-        if session_id:
-            changes["zoom_session_id"] = session_id
-        conversation = store.update_sms_conversation(conversation["id"], **changes)
-    except zoom_sms.ZoomSmsError as exc:
-        store.update_sms_message(message["id"], status="failed", failure_reason=str(exc))
-        raise HTTPException(502, str(exc)) from exc
-    return {
-        "conversation": store.get_sms_conversation(conversation["id"]),
-        "message": message,
     }
 
 
@@ -1457,10 +1324,6 @@ def send_sms(body: SmsSendIn, request: Request):
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
     phone = _candidate_sms_phone(candidate, body.phone)
-    consent = store.get_sms_consent(body.candidate_id, phone)
-    test_bypass = _sms_test_bypass(phone)
-    if (not consent or consent.get("status") != "opted_in") and not test_bypass:
-        raise HTTPException(409, "Documented SMS permission is required before sending.")
     if store.is_dnc(phone):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
     text = body.message.strip()
@@ -1605,13 +1468,6 @@ async def zoom_webhook(request: Request):
                 "inbound_sms", f"Zoom webhook {event_key}", captured_by="zoom",
             )
             current = store.update_sms_conversation(current["id"], status="opted_out")
-        elif keyword in {"start", "yes", "unstop"}:
-            store.record_sms_consent(
-                int(current["candidate_id"]), current["candidate_phone"], "opted_in",
-                "inbound_sms", f"Zoom opt-in reply {event_key}", captured_by="zoom",
-                disclosure_version="medhunt-sms-opt-in-v1",
-            )
-            current = store.update_sms_conversation(current["id"], status="open")
         try:
             healthboard_auth.report_message_event(
                 event_id=event_key, conversation=current, event_type="received",

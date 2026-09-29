@@ -122,18 +122,6 @@ ZOOM_SMS_ENABLED = bool(
     ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
     and ZOOM_CLIENT_SECRET and ZOOM_SMS_SENDER_USER_ID and ZOOM_SMS_SENDER_NUMBER
 )
-# Development-only consent bypass. It is deliberately restricted to an
-# explicit phone-number allowlist so this cannot become an unrestricted
-# production outreach switch.
-ZOOM_SMS_TEST_MODE = os.getenv("ZOOM_SMS_TEST_MODE", "0").strip().lower() in (
-    "1", "true", "yes",
-)
-ZOOM_SMS_TEST_NUMBERS = tuple(dict.fromkeys(
-    value.strip()
-    for value in os.getenv("ZOOM_SMS_TEST_NUMBERS", "").split(",")
-    if value.strip()
-))
-
 # Shared server-to-server credential used only for Medhunt webhook activity
 # reporting. User-initiated HealthBoard calls continue to use the user's opaque
 # extension token.
@@ -313,7 +301,7 @@ QUICK_SOURCER_TRUSTED_FOR_SYNC = os.getenv(
 ).strip().lower() in ("1", "true", "yes")
 
 # Demo mode returns deterministic mock enrichment when no key is set OR when
-# ENFORMION_DEMO=1 — lets you run the whole product before wiring the real key.
+# ENFORMION_DEMO=1 â€” lets you run the whole product before wiring the real key.
 DEMO_MODE = os.getenv("ENFORMION_DEMO", "").strip() in ("1", "true", "yes") or not ENFORMION_ENABLED
 
 # ---- LLM (Gemini) for outreach drafting ----

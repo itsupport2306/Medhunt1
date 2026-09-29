@@ -2546,7 +2546,7 @@ def mark_outreach(outreach_id, status):
         return cursor.rowcount > 0
 
 
-# ---- consent-gated SMS conversations ----
+# ---- SMS conversations and opt-out records ----
 def record_sms_consent(candidate_id, phone, status, source, evidence,
                        captured_by="", disclosure_version="v1"):
     normalized_status = str(status or "").strip().casefold()
