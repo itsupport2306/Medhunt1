@@ -120,7 +120,7 @@ ZOOM_OAUTH_URL = os.getenv("ZOOM_OAUTH_URL", "https://zoom.us/oauth/token").stri
 ZOOM_SMS_TIMEOUT = max(3.0, min(60.0, float(os.getenv("ZOOM_SMS_TIMEOUT", "20"))))
 ZOOM_SMS_ENABLED = bool(
     ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
-    and ZOOM_CLIENT_SECRET and ZOOM_SMS_SENDER_USER_ID and ZOOM_SMS_SENDER_NUMBER
+    and ZOOM_CLIENT_SECRET
 )
 # Shared server-to-server credential used only for Medhunt webhook activity
 # reporting. User-initiated HealthBoard calls continue to use the user's opaque

@@ -67,6 +67,9 @@ CREATE TABLE IF NOT EXISTS sms_messages(
   failure_reason TEXT DEFAULT '', created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS sms_webhook_events(
   event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL);
+CREATE TABLE IF NOT EXISTS sms_outreach_claims(
+  candidate_id INTEGER PRIMARY KEY, phone_key TEXT NOT NULL,
+  status TEXT DEFAULT 'sending', created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS talent_pools(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
   created REAL, updated REAL);
@@ -303,6 +306,11 @@ _POSTGRES_SCHEMA = (
          event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
          created DOUBLE PRECISION
        )""",
+    """CREATE TABLE IF NOT EXISTS sms_outreach_claims(
+         candidate_id BIGINT PRIMARY KEY, phone_key TEXT NOT NULL,
+         status TEXT DEFAULT 'sending', created DOUBLE PRECISION,
+         updated DOUBLE PRECISION
+       )""",
     # Older deployments may already contain one or more of these tables from
     # before candidate-level attribution was added. CREATE TABLE IF NOT EXISTS
     # does not evolve an existing table, so repair every candidate-bearing
@@ -393,6 +401,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
+    "sms_outreach_claims",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
     "enrichment_events": ("candidate_id",),
@@ -2764,6 +2773,47 @@ def find_sms_conversation(*, session_id="", phone=""):
                    ORDER BY updated DESC LIMIT 1""", (contact_key(phone),)
             ).fetchone()
         return dict(row) if row else None
+
+
+def sms_candidate_contacted(candidate_id, phone="") -> bool:
+    """Whether any outbound SMS already exists for this candidate/number."""
+    params = [int(candidate_id)]
+    phone_clause = ""
+    if phone:
+        phone_clause = " AND c.phone_key=?"
+        params.append(contact_key(phone))
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT 1 FROM sms_messages m
+               JOIN sms_conversations c ON c.id=m.conversation_id
+               WHERE c.candidate_id=? AND m.direction='outbound' AND m.status<>'failed'""" + phone_clause +
+            " LIMIT 1",
+            tuple(params),
+        ).fetchone()
+        return bool(row)
+
+
+def claim_sms_outreach(candidate_id, phone):
+    """Atomically reserve first outbound SMS for a candidate across workers."""
+    now = time.time()
+    with _conn() as connection:
+        cursor = connection.execute(
+            """INSERT INTO sms_outreach_claims(candidate_id,phone_key,status,created,updated)
+               VALUES(?,?,'sending',?,?)
+               ON CONFLICT(candidate_id) DO UPDATE SET
+                 phone_key=excluded.phone_key,status='sending',updated=excluded.updated
+               WHERE sms_outreach_claims.status='failed'""",
+            (int(candidate_id), contact_key(phone), now, now),
+        )
+        return cursor.rowcount > 0
+
+
+def update_sms_outreach_claim(candidate_id, status):
+    with _conn() as connection:
+        connection.execute(
+            "UPDATE sms_outreach_claims SET status=?,updated=? WHERE candidate_id=?",
+            (str(status), time.time(), int(candidate_id)),
+        )
 
 
 def reconcile_outbound_sms(conversation_id, *, zoom_message_id="", status="sent",

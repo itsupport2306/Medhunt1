@@ -153,6 +153,8 @@ let activeJobId = null;
 let activeView = IS_EXTENSION ? "indeed" : "candidates";
 let activeDraft = null;
 let activeSmsContext = null;
+let selectedSmsCandidates = new Set();
+let visibleCandidates = [];
 let activeIndeedProfile = null;
 let publicRecordReturnProfile = null;
 let activePublicRecordResult = null;
@@ -475,6 +477,7 @@ function publicPhoneLabel(kind) {
 function candidateCard(candidate) {
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
+  const mobileContact = publicPhoneContacts(candidate).find((item) => item.kind === "mobile") || null;
   const phone = phoneContact?.value || "";
   const phoneLabel = publicPhoneLabel(phoneContact?.kind);
   const address = Array.isArray(candidate.addresses) ? candidate.addresses[0] : "";
@@ -507,10 +510,11 @@ function candidateCard(candidate) {
     <div><span class="${stageClass(stage)}">${escapeHtml(stage)}</span></div>
     ${contact}
     <div class="candidate-actions">
+      ${IS_EXTENSION && mobileContact?.value ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
       <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}">Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
-      ${phoneContact?.kind === "mobile" ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(phone)}">Send SMS</button>` : ""}
+      ${mobileContact?.value ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(mobileContact.value)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -533,6 +537,7 @@ async function viewCandidates() {
       api(`/candidates${suffix}`),
       api("/stats"),
     ]);
+    visibleCandidates = candidates;
     $("#content").innerHTML = `
       <div class="notice">Candidate contact access · human approval required · do-not-contact enforced.</div>
       <div class="kpis">
@@ -549,6 +554,7 @@ async function viewCandidates() {
             <select id="jobSelect" class="field-auto">${jobOptions(true)}</select>
           </div>
           <div class="row">
+            ${IS_EXTENSION ? `<button type="button" class="btn teal" data-action="bulk-sms"${selectedSmsCandidates.size ? "" : " disabled"}>Bulk SMS (${selectedSmsCandidates.size})</button>` : ""}
             ${IS_EXTENSION ? `<button type="button" class="btn capture-btn" data-action="capture-indeed">Capture sourcing profile</button>` : ""}
             <button type="button" class="btn teal" data-action="enrich-all">Enrich all</button>
             <button type="button" class="btn ghost" data-action="rank-all"${activeJobId ? "" : " disabled"}>Rank vs job</button>
@@ -3838,20 +3844,21 @@ async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
   activeSmsContext = { candidateId, candidateName, phone };
   const status = await api("/messaging/status");
-  const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
-  const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
+  const canSend = Boolean(status.enabled && status.sender_configured);
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
       <span class="section-kicker">Zoom Phone</span>
       <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
       <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
+      ${status.enabled && !status.sender_configured ? `<div class="notice error">Ask your Halo administrator to assign your Zoom Phone number before sending.</div>` : ""}
+      ${!status.reply_notifications_configured ? `<div class="notice mt">Reply email notifications are not fully configured.</div>` : ""}
       <label class="field-label" for="smsMessage">Message</label>
-      <textarea id="smsMessage" rows="6" maxlength="420"${status.enabled ? "" : " disabled"}>${escapeHtml(defaultMessage)}</textarea>
+      <textarea id="smsMessage" rows="6" maxlength="420" placeholder="Write a custom message for this candidate"${canSend ? "" : " disabled"}></textarea>
       <p class="muted small">Medhunt automatically adds its identity and ?Reply STOP to opt out? to each message.</p>
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
-        <button type="button" class="btn teal" data-action="send-sms"${status.enabled ? "" : " disabled"}>Send with Zoom Phone</button>
+        <button type="button" class="btn teal" data-action="send-sms"${canSend ? "" : " disabled"}>Send with Zoom Phone</button>
       </div>
     </section>
   </div>`;
@@ -3882,6 +3889,95 @@ async function sendCandidateSms() {
   });
   closeModal();
   notify("Message accepted by Zoom Phone.");
+}
+
+async function showBulkSmsComposer() {
+  const selected = visibleCandidates.filter((candidate) => selectedSmsCandidates.has(Number(candidate.id)));
+  if (!selected.length) throw new Error("Select at least one candidate with a verified mobile number.");
+  const status = await api("/messaging/status");
+  if (!status.enabled) throw new Error("Zoom Phone SMS is not configured on the Medhunt server.");
+  if (!status.sender_configured) throw new Error("Ask your Halo administrator to assign your Zoom Phone number before sending.");
+  const entries = [];
+  for (const candidate of selected) {
+    const mobile = publicPhoneContacts(candidate).find((item) => item.kind === "mobile")?.value || "";
+    if (!mobile) continue;
+    let preview = { phone: mobile, opted_out: false, already_contacted: false };
+    try {
+      preview = await api("/candidates/" + Number(candidate.id) + "/sms-preview?phone=" + encodeURIComponent(mobile));
+    } catch (error) {
+      preview = { phone: mobile, opted_out: true, already_contacted: false, error: error.message };
+    }
+    const firstName = String(candidate.name || "there").trim().split(/\s+/u)[0] || "there";
+    entries.push({
+      candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
+      phone: preview.phone || mobile,
+      message: "Hello " + firstName + ", This is Brian from Radixsol. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
+      blocked: Boolean(preview.opted_out || preview.already_contacted || preview.error),
+      reason: preview.error || (preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
+    });
+  }
+  if (!entries.length) throw new Error("The selected candidates have no verified mobile numbers.");
+  activeSmsContext = { bulk: entries };
+  const cards = entries.map((entry, index) =>
+    '<div class="card bulk-sms-item"><div class="row spread"><strong>' + escapeHtml(entry.name) +
+    '</strong><span class="muted small">' + escapeHtml(entry.phone) + '</span></div>' +
+    (entry.blocked ? '<p class="notice error mt">' + escapeHtml(entry.reason || "Cannot send") + '</p>' : "") +
+    '<textarea data-bulk-sms-message="' + index + '" rows="4" maxlength="1600"' +
+    (entry.blocked ? " disabled" : "") + '>' + escapeHtml(entry.message) + '</textarea>' +
+    '<p class="muted small" data-bulk-sms-count="' + index + '"></p></div>'
+  ).join("");
+  $("#modalRoot").innerHTML = '<div class="modal" role="presentation"><section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="bulkSmsTitle">' +
+    '<span class="section-kicker">Zoom Phone</span><h3 id="bulkSmsTitle">Review bulk SMS (' + entries.length + ')</h3>' +
+    '<p class="muted small">Edit each message before sending. Messages over 29 words, opted-out candidates, and candidates already contacted are blocked.</p>' +
+    '<div class="bulk-sms-list">' + cards + '</div><div class="row modal-actions">' +
+    '<button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+    '<button type="button" class="btn teal" data-action="send-bulk-sms">Send available messages</button></div></section></div>';
+  $("#modalRoot").querySelectorAll("[data-bulk-sms-message]").forEach((field) => {
+    const update = () => {
+      const words = field.value.trim().split(/\s+/u).filter(Boolean).length;
+      const counter = $("[data-bulk-sms-count=\"" + field.dataset.bulkSmsMessage + "\"]");
+      if (counter) counter.textContent = words + " / 29 words" + (words > 29 ? " · over limit" : "");
+    };
+    field.addEventListener("input", update);
+    update();
+  });
+}
+
+async function sendBulkSms() {
+  const entries = activeSmsContext?.bulk || [];
+  if (!entries.length) throw new Error("Bulk message review expired.");
+  const ready = entries.map((entry, index) => ({
+    ...entry,
+    message: $("[data-bulk-sms-message=\"" + index + "\"]")?.value.trim() || "",
+  })).filter((entry) => !entry.blocked);
+  for (const entry of ready) {
+    const words = entry.message.split(/\s+/u).filter(Boolean).length;
+    if (!words) throw new Error("Write a message for " + entry.name + ".");
+    if (words > 29) throw new Error(entry.name + "'s message is over the 29-word limit.");
+  }
+  if (!ready.length) throw new Error("There are no eligible messages to send.");
+  const button = $("[data-action=\"send-bulk-sms\"]");
+  if (button) button.disabled = true;
+  let sent = 0;
+  let failed = 0;
+  for (const entry of ready) {
+    try {
+      await api("/messaging/sms", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_id: entry.candidateId, phone: entry.phone,
+          message: entry.message, request_id: crypto.randomUUID() }), timeout: 60000,
+      });
+      sent += 1;
+      selectedSmsCandidates.delete(entry.candidateId);
+    } catch {
+      failed += 1;
+    }
+  }
+  closeModal();
+  activeSmsContext = null;
+  notify(sent + " message" + (sent === 1 ? "" : "s") + " accepted by Zoom Phone" +
+    (failed ? "; " + failed + " failed" : "."), failed ? "error" : "");
+  if (activeView === "candidates") await viewCandidates();
 }
 
 async function viewMessages() {
@@ -4131,6 +4227,18 @@ document.addEventListener("click", async (event) => {
   const id = Number(button.dataset.id);
   const index = Number(button.dataset.index);
 
+  if (action === "toggle-sms-candidate") {
+    const candidateId = Number(button.dataset.candidateId);
+    if (button.checked) selectedSmsCandidates.add(candidateId);
+    else selectedSmsCandidates.delete(candidateId);
+    const bulkButton = $('[data-action="bulk-sms"]');
+    if (bulkButton) {
+      bulkButton.textContent = `Bulk SMS (${selectedSmsCandidates.size})`;
+      bulkButton.disabled = selectedSmsCandidates.size === 0;
+    }
+    return;
+  }
+
   if (action === "close-modal") {
     closeModal();
     return;
@@ -4188,6 +4296,8 @@ document.addEventListener("click", async (event) => {
     "draft": () => draftOutreach(id),
     "compose-sms": () => composeSmsFromButton(button),
     "send-sms": sendCandidateSms,
+    "bulk-sms": showBulkSmsComposer,
+    "send-bulk-sms": sendBulkSms,
     "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
     "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),
     "approve-draft": () => approveDraft(id),

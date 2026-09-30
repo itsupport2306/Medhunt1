@@ -54,7 +54,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.26.5"
+APP_VERSION = "3.26.6"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -1307,11 +1307,55 @@ def _candidate_sms_phone(candidate: dict, supplied: str) -> str:
 
 @app.get("/messaging/status")
 def messaging_status(request: Request):
-    _request_user(request)
+    user = _request_user(request)
+    zoom_sender = _resolve_zoom_sms_sender(request, strict=False) if zoom_sms.enabled() else None
     return {
         "enabled": zoom_sms.enabled(),
         "provider": "zoom_phone",
-        "sender_configured": bool(config.ZOOM_SMS_SENDER_NUMBER),
+        "sender_configured": bool(zoom_sender),
+        "sender_number": str((zoom_sender or {}).get("sender_number") or ""),
+        "zoom_sender_required": bool(zoom_sms.enabled() and not zoom_sender),
+        "reply_notifications_configured": bool(
+            config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN and healthboard_auth.enabled()
+        ),
+    }
+
+
+def _resolve_zoom_sms_sender(request: Request, *, strict: bool) -> dict | None:
+    if healthboard_auth.enabled():
+        token = str(getattr(request.state, "healthboard_extension_token", "") or "")
+        try:
+            return healthboard_auth.medhunt_zoom_sms_sender(token)
+        except Exception as exc:
+            logging.getLogger("medhunt.zoom_sms").warning(
+                "Could not load the recruiter Zoom sender assignment (%s).",
+                type(exc).__name__,
+            )
+            if strict:
+                raise HTTPException(
+                    503,
+                    "Could not verify your Zoom sender assignment. Try again or contact your Halo administrator.",
+                ) from exc
+            return None
+    if config.ZOOM_SMS_SENDER_NUMBER and config.ZOOM_SMS_SENDER_USER_ID:
+        return {
+            "sender_number": config.ZOOM_SMS_SENDER_NUMBER,
+            "zoom_user_id": config.ZOOM_SMS_SENDER_USER_ID,
+        }
+    return None
+
+
+@app.get("/candidates/{candidate_id}/sms-preview")
+def sms_preview(candidate_id: int, phone: str, request: Request):
+    _request_user(request)
+    candidate = store.get_candidate(candidate_id)
+    if not candidate:
+        raise HTTPException(404, "Candidate not found.")
+    verified_phone = _candidate_sms_phone(candidate, phone)
+    return {
+        "phone": verified_phone,
+        "opted_out": store.is_dnc(verified_phone),
+        "already_contacted": store.sms_candidate_contacted(candidate_id),
     }
 
 
@@ -1320,6 +1364,12 @@ def send_sms(body: SmsSendIn, request: Request):
     user = _request_user(request)
     if not zoom_sms.enabled():
         raise HTTPException(503, "Zoom Phone SMS is not configured.")
+    zoom_sender = _resolve_zoom_sms_sender(request, strict=True)
+    if not zoom_sender:
+        raise HTTPException(
+            409,
+            "Ask your Halo administrator to assign your Zoom Phone number before sending.",
+        )
     candidate = store.get_candidate(body.candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
@@ -1327,6 +1377,14 @@ def send_sms(body: SmsSendIn, request: Request):
     if store.is_dnc(phone):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
     text = body.message.strip()
+    if not text:
+        raise HTTPException(400, "Write a message before sending.")
+    if len(text.split()) > 29:
+        raise HTTPException(422, "SMS messages are limited to 29 words.")
+    if store.sms_candidate_contacted(body.candidate_id):
+        raise HTTPException(409, "This candidate has already received SMS outreach.")
+    if not store.claim_sms_outreach(body.candidate_id, phone):
+        raise HTTPException(409, "This candidate has already received SMS outreach.")
     if "reply stop" not in text.casefold():
         text = f"{text}\n\nMedhunt recruiting. Reply STOP to opt out."
     if len(text) > 500:
@@ -1335,7 +1393,7 @@ def send_sms(body: SmsSendIn, request: Request):
         body.candidate_id, phone,
         candidate_name=str(candidate.get("name") or ""),
         initiated_by=str(user.get("sub") or ""),
-        sender_number=config.ZOOM_SMS_SENDER_NUMBER,
+        sender_number=str(zoom_sender["sender_number"]),
     )
     request_id = body.request_id.strip() or uuid.uuid4().hex
     message, created = store.create_sms_message(
@@ -1344,12 +1402,17 @@ def send_sms(body: SmsSendIn, request: Request):
     if not created:
         return {"conversation": store.get_sms_conversation(conversation["id"]), "message": message}
     try:
-        result = zoom_sms.send_sms(phone, text)
+        result = zoom_sms.send_sms(
+            phone, text,
+            sender_number=str(zoom_sender["sender_number"]),
+            sender_user_id=str(zoom_sender["zoom_user_id"]),
+        )
         zoom_message_id = str(result.get("message_id") or result.get("id") or "")
         session_id = str(result.get("session_id") or "")
         message = store.update_sms_message(
             message["id"], status="accepted", zoom_message_id=zoom_message_id,
         )
+        store.update_sms_outreach_claim(body.candidate_id, "sent")
         if session_id:
             conversation = store.update_sms_conversation(
                 conversation["id"], zoom_session_id=session_id,
@@ -1364,6 +1427,7 @@ def send_sms(body: SmsSendIn, request: Request):
             logging.getLogger("medhunt.healthboard").exception("Send reporting failed")
     except zoom_sms.ZoomSmsError as exc:
         store.update_sms_message(message["id"], status="failed", failure_reason=str(exc))
+        store.update_sms_outreach_claim(body.candidate_id, "failed")
         raise HTTPException(502, str(exc)) from exc
     return {"conversation": store.get_sms_conversation(conversation["id"]), "message": message}
 

@@ -116,6 +116,25 @@ def assign_conversation(token: str, *, conversation: dict, recruiter_user_id: st
     return response.json()
 
 
+def medhunt_zoom_sms_sender(token: str) -> dict | None:
+    """Return this signed-in recruiter's Zoom sender assignment from Halo."""
+    supplied = str(token or "").strip()
+    if not enabled() or not supplied:
+        return None
+    response = httpx.get(
+        _url("/api/extension/medhunt/sms-sender"),
+        headers={"X-Capture-Token": supplied},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    if response.status_code == 409:
+        return None
+    response.raise_for_status()
+    payload = response.json()
+    number = str(payload.get("sender_number") or "").strip()
+    zoom_user_id = str(payload.get("zoom_user_id") or "").strip()
+    return {"sender_number": number, "zoom_user_id": zoom_user_id} if number and zoom_user_id else None
+
+
 def report_message_event(*, event_id: str, conversation: dict, event_type: str,
                          message_preview: str = "") -> bool:
     """Report asynchronous Zoom activity without exposing a user's session."""
