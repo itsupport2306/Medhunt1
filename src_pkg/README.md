@@ -589,7 +589,10 @@ Set these backend variables for the authentication method supplied by Nexus:
 
 ```text
 NEXUS_SYNC_ENABLED=1
+NEXUS_PRECHECK_ENABLED=1
+NEXUS_PRECHECK_CACHE_SECONDS=300
 NEXUS_BASE_URL=https://api-nexus.laboredge.com
+NEXUS_API_BASE_URL=https://api-nexus.laboredge.com:9000
 NEXUS_AUTH_METHOD=password
 NEXUS_TOKEN_URL=<tenant OAuth token URL>
 NEXUS_USERNAME=<backend API user>
@@ -606,6 +609,15 @@ provide either `NEXUS_CLIENT_ID` plus `NEXUS_CLIENT_SECRET` or
 included in the browser extension. A trusted-team installer can also resolve
 the allowlisted settings from `NEXUS_REFERENCE_ENV` and
 `NEXUS_REFERENCE_CONFIG` while it is built.
+
+When `NEXUS_PRECHECK_ENABLED=1`, Medhunt searches Nexus by exact email, exact
+phone, and NPI before exposing enriched contacts or sending Zoom Phone SMS.
+Candidates in an active Nexus status are shown as already active with their
+current recruiter and cannot be enriched or messaged. If Nexus cannot be
+verified, these actions fail closed and can be retried after the service is
+available. The setting defaults to the value of `NEXUS_SYNC_ENABLED`, so an
+existing Nexus-enabled Render service does not require another environment
+variable.
 
 For a hosted deployment, add the production Chrome extension origin after the
 Chrome Web Store assigns its ID:

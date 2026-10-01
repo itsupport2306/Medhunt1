@@ -118,10 +118,7 @@ ZOOM_WEBHOOK_SECRET_TOKEN = os.getenv("ZOOM_WEBHOOK_SECRET_TOKEN", "").strip()
 ZOOM_API_BASE_URL = os.getenv("ZOOM_API_BASE_URL", "https://api.zoom.us/v2").strip().rstrip("/")
 ZOOM_OAUTH_URL = os.getenv("ZOOM_OAUTH_URL", "https://zoom.us/oauth/token").strip()
 ZOOM_SMS_TIMEOUT = max(3.0, min(60.0, float(os.getenv("ZOOM_SMS_TIMEOUT", "20"))))
-ZOOM_SMS_ENABLED = bool(
-    ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
-    and ZOOM_CLIENT_SECRET
-)
+ZOOM_SMS_ENABLED = bool(ZOOM_SMS_ENABLED_REQUESTED)
 # Shared server-to-server credential used only for Medhunt webhook activity
 # reporting. User-initiated HealthBoard calls continue to use the user's opaque
 # extension token.
@@ -431,6 +428,13 @@ S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL", "").strip().rstrip("/")
 NEXUS_BASE_URL = os.getenv(
     "NEXUS_BASE_URL", "https://api-nexus.laboredge.com"
 ).strip().rstrip("/")
+NEXUS_API_BASE_URL = os.getenv("NEXUS_API_BASE_URL", "").strip().rstrip("/")
+if not NEXUS_API_BASE_URL:
+    NEXUS_API_BASE_URL = (
+        "https://api-nexus.laboredge.com:9000"
+        if NEXUS_BASE_URL.casefold() == "https://api-nexus.laboredge.com"
+        else NEXUS_BASE_URL
+    )
 NEXUS_AUTH_METHOD = os.getenv("NEXUS_AUTH_METHOD", "static").strip().lower()
 NEXUS_TOKEN_URL = os.getenv("NEXUS_TOKEN_URL", "").strip()
 NEXUS_TOKEN_PAYLOAD_STYLE = os.getenv(
@@ -496,11 +500,18 @@ _NEXUS_AUTH_CONFIGURED = bool(
 NEXUS_SYNC_REQUESTED = (
     os.getenv("NEXUS_SYNC_ENABLED", "0").strip().lower() in ("1", "true", "yes")
 )
+NEXUS_PRECHECK_ENABLED = (
+    os.getenv("NEXUS_PRECHECK_ENABLED", os.getenv("NEXUS_SYNC_ENABLED", "0"))
+    .strip().lower() in ("1", "true", "yes")
+) and bool(NEXUS_BASE_URL and _NEXUS_AUTH_CONFIGURED)
+NEXUS_PRECHECK_CACHE_SECONDS = max(
+    0, int(os.getenv("NEXUS_PRECHECK_CACHE_SECONDS", "300"))
+)
 if not NEXUS_SYNC_REQUESTED:
     NEXUS_DISABLED_REASON = "not_requested"
 elif _NEXUS_DEFAULT_PROFILE_ERROR:
     NEXUS_DISABLED_REASON = _NEXUS_DEFAULT_PROFILE_ERROR
-elif not NEXUS_BASE_URL:
+elif not NEXUS_API_BASE_URL:
     NEXUS_DISABLED_REASON = "api_address_missing"
 elif not _NEXUS_AUTH_CONFIGURED:
     NEXUS_DISABLED_REASON = "authentication_not_configured"

@@ -126,13 +126,30 @@ def medhunt_zoom_sms_sender(token: str) -> dict | None:
         headers={"X-Capture-Token": supplied},
         timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
     )
-    if response.status_code == 409:
-        return None
     response.raise_for_status()
     payload = response.json()
     number = str(payload.get("sender_number") or "").strip()
     zoom_user_id = str(payload.get("zoom_user_id") or "").strip()
-    return {"sender_number": number, "zoom_user_id": zoom_user_id} if number and zoom_user_id else None
+    return {
+        "sender_number": number,
+        "zoom_user_id": zoom_user_id,
+        "employer_id": str(payload.get("employer_id") or "").strip(),
+        "messaging_status": str(payload.get("messaging_status") or "enabled"),
+    } if number and zoom_user_id else None
+
+
+def organization_zoom_access(employer_id: str) -> str:
+    """Get a short-lived organization OAuth token over the service channel."""
+    if not enabled() or not config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN or not employer_id:
+        return ""
+    response = httpx.post(
+        _url("/api/extension/medhunt/zoom-access"),
+        headers={"X-Medhunt-Service-Token": config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN},
+        json={"employer_id": employer_id},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return str(response.json().get("access_token") or "")
 
 
 def report_message_event(*, event_id: str, conversation: dict, event_type: str,

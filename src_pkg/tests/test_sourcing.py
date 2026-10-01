@@ -4346,6 +4346,31 @@ def test_zoom_sms_sends_directly_and_is_idempotent(monkeypatch):
     asyncio.run(exercise())
 
 
+def test_zoom_sms_preserves_halo_messaging_permission_denial(monkeypatch):
+    import pytest
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    monkeypatch.setattr(healthboard_auth, "enabled", lambda: True)
+    response = httpx.Response(
+        403,
+        json={"detail": "Your organization has paused or disabled your messaging access."},
+        request=httpx.Request("GET", "https://halo.example.test/api/extension/medhunt/sms-sender"),
+    )
+
+    def denied(_token):
+        raise httpx.HTTPStatusError("denied", request=response.request, response=response)
+
+    monkeypatch.setattr(healthboard_auth, "medhunt_zoom_sms_sender", denied)
+    request = Request({"type": "http", "method": "POST", "path": "/messaging/sms", "headers": []})
+    request.state.healthboard_extension_token = "extension-token"
+
+    with pytest.raises(HTTPException) as caught:
+        api_module._resolve_zoom_sms_sender(request, strict=True)
+    assert caught.value.status_code == 403
+    assert "paused or disabled" in caught.value.detail
+
+
 def test_zoom_sms_direct_send_does_not_require_a_test_number_allowlist(monkeypatch):
     store.reset()
     allowed_id = store.add_candidate("Owned Test Phone", "Atlanta, GA", source="test")

@@ -53,7 +53,7 @@ def _access_token() -> str:
 
 
 def send_sms(to_number: str, message: str, *, sender_number: str = "",
-             sender_user_id: str = "") -> dict:
+             sender_user_id: str = "", access_token: str = "") -> dict:
     """Send one Zoom Phone SMS from the assigned licensed user/number."""
     if not enabled():
         raise ZoomSmsError("Zoom Phone SMS is not configured.")
@@ -70,7 +70,7 @@ def send_sms(to_number: str, message: str, *, sender_number: str = "",
         f"{config.ZOOM_API_BASE_URL}/phone/sms/messages",
         params={"user_id": sender_user_id},
         json=payload,
-        headers={"Authorization": f"Bearer {_access_token()}"},
+        headers={"Authorization": f"Bearer {access_token or _access_token()}"},
         timeout=config.ZOOM_SMS_TIMEOUT,
     )
     if response.status_code >= 400:

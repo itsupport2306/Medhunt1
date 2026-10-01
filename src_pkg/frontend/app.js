@@ -475,6 +475,8 @@ function publicPhoneLabel(kind) {
 }
 
 function candidateCard(candidate) {
+  const nexus = candidate.nexus_eligibility || {};
+  const nexusBlocked = nexus.blocked === true;
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
   const mobileContact = publicPhoneContacts(candidate).find((item) => item.kind === "mobile") || null;
@@ -487,6 +489,9 @@ function candidateCard(candidate) {
   const stage = STAGES.includes(candidate.stage) ? candidate.stage : "new";
   const publicRecord = candidate.records_available
     ? `<span class="contact-origin">Public record</span>`
+    : "";
+  const nexusNotice = nexusBlocked
+    ? `<div class="notice error"><strong>Already active in Nexus</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
     : "";
   const contact = successful
     ? `<div class="contact">
@@ -508,13 +513,14 @@ function candidateCard(candidate) {
       <div class="fit"><div class="number">${Number(candidate.fit_score) || 0}</div><div class="label">FIT</div></div>
     </div>
     <div><span class="${stageClass(stage)}">${escapeHtml(stage)}</span></div>
+    ${nexusNotice}
     ${contact}
     <div class="candidate-actions">
-      ${IS_EXTENSION && mobileContact?.value ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
-      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}">Enrich</button>
+      ${IS_EXTENSION && mobileContact?.value && !nexusBlocked ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
+      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}"${nexusBlocked ? " disabled" : ""}>Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
-      ${mobileContact?.value ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(mobileContact.value)}">Send SMS</button>` : ""}
+      ${mobileContact?.value && !nexusBlocked ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(mobileContact.value)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -638,8 +644,8 @@ async function submitIntake() {
 }
 
 async function enrichCandidate(id) {
-  await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
-  notify("Candidate enriched.");
+  const result = await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
+  notify(result.status === "blocked" ? "Candidate is already active in Nexus." : "Candidate enriched.");
   await viewCandidates();
 }
 
@@ -1895,6 +1901,14 @@ function indeedResultStatus(profile) {
   if (result.status === "looking_up") {
     return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact</span>`;
   }
+  if (result.status === "blocked") {
+    const nexus = result.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    return `<div class="lookup-outcome">
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>Already active in Nexus</span>
+      ${details ? `<span class="lookup-detail">${escapeHtml(details)}</span>` : ""}
+    </div>`;
+  }
   if (isIndeedMatch(result)) {
     const emails = result.emails || [];
     const phoneContacts = publicPhoneContacts(result);
@@ -1974,7 +1988,9 @@ function indeedFilteredProfiles() {
     return scopedProfiles.filter((profile) => isIndeedMatch(indeedLookupFor(profile)));
   }
   if (indeedResultFilter === "no_match") {
-    return scopedProfiles.filter((profile) => indeedLookupFor(profile)?.status === "not_found");
+    return scopedProfiles.filter((profile) => ["not_found", "blocked"].includes(
+      indeedLookupFor(profile)?.status,
+    ));
   }
   if (indeedResultFilter === "failed") {
     return scopedProfiles.filter((profile) => indeedLookupFor(profile)?.status === "failed");
@@ -2402,6 +2418,10 @@ async function performDisplayedIndeedSave(searchUrl) {
     source: boundedText(profile.source, 50),
     source_url: boundedText(profile.source_url, 2000),
     source_id: boundedText(profile.source_id, 500),
+    npi: boundedText(profile.profile_document?.npi || (
+      ["npino", "npiprofile"].includes(String(profile.source || "").toLowerCase())
+        ? profile.source_id : ""
+    ), 30),
   }));
   try {
     const result = await api("/candidates/import/batch", {
@@ -3146,7 +3166,7 @@ async function lookupSelectedIndeedCandidates() {
 
   function applyLookupResult(profile, lookup) {
     const previous = indeedLookupFor(profile);
-    const status = ["found", "not_found", "failed"].includes(lookup?.status)
+    const status = ["found", "not_found", "failed", "blocked"].includes(lookup?.status)
       ? lookup.status
       : "failed";
     const result = {
@@ -3165,6 +3185,7 @@ async function lookupSelectedIndeedCandidates() {
         lookup.location_match.value.trim()
         ? { type: "hometown", value: lookup.location_match.value.trim().slice(0, 160) }
         : null,
+      nexus_eligibility: lookup?.nexus_eligibility || {},
       resume: previous.resume || null,
       resume_status: previous.resume_status || "",
       resume_error: previous.resume_error || "",
@@ -3842,6 +3863,14 @@ async function copyDraft() {
 
 async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
+  const preview = await api("/candidates/" + Number(candidateId) + "/sms-preview?phone=" + encodeURIComponent(phone));
+  if (preview.nexus_blocked) {
+    const nexus = preview.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    throw new Error("This candidate is already active in Nexus" + (details ? " (" + details + ")." : "."));
+  }
+  if (preview.opted_out) throw new Error("This number has opted out and cannot be messaged.");
+  if (preview.already_contacted) throw new Error("This candidate has already received SMS outreach.");
   activeSmsContext = { candidateId, candidateName, phone };
   const status = await api("/messaging/status");
   const canSend = Boolean(status.enabled && status.sender_configured);
@@ -3912,8 +3941,8 @@ async function showBulkSmsComposer() {
       candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
       phone: preview.phone || mobile,
       message: "Hello " + firstName + ", This is Brian from Radixsol. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
-      blocked: Boolean(preview.opted_out || preview.already_contacted || preview.error),
-      reason: preview.error || (preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
+      blocked: Boolean(preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
+      reason: preview.error || (preview.nexus_blocked ? "Already active in Nexus" : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
     });
   }
   if (!entries.length) throw new Error("The selected candidates have no verified mobile numbers.");

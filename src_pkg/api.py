@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
@@ -32,7 +34,7 @@ from sourcing import (
     resume_enrichment, contact_access,
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
-    profile_resume, zoom_sms,
+    profile_resume, zoom_sms, nexus_eligibility,
 )
 
 
@@ -54,7 +56,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.26.6"
+APP_VERSION = "3.27.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -216,6 +218,7 @@ class ProfileImportIn(BaseModel):
     source: str = "indeed"
     source_url: str = ""
     source_id: str = ""
+    npi: str = Field(default="", max_length=30)
     job_id: int | None = None
 
 
@@ -422,6 +425,9 @@ def _public_lookup_result(result: dict) -> dict:
 
 def _public_candidate(candidate: dict | None) -> dict:
     projected = contact_access.project_candidate(candidate)
+    nexus = nexus_eligibility.stored_result(candidate or {})
+    if nexus.get("blocked"):
+        projected = {**projected, "emails": [], "phones": [], "phone_contacts": []}
     allowed = (
         "id", "name", "location", "job_id", "stage", "fit_score",
         "emails", "phones", "phone_contacts", "addresses", "enrich_status",
@@ -431,6 +437,7 @@ def _public_candidate(candidate: dict | None) -> dict:
     public["records_available"] = bool(
         str(projected.get("contact_source") or "") == "quick_sourcer"
     )
+    public["nexus_eligibility"] = nexus
     return public
 
 
@@ -659,6 +666,9 @@ def _profile_row(body: ProfileImportIn, default_job_id: int | None = None):
         add_evidence_line(evidence_lines, "School", value)
     for value in source_values(body.specialties, limit=20):
         add_evidence_line(evidence_lines, "Specialty", value)
+    npi = re.sub(r"\D", "", body.npi or "")
+    if len(npi) == 10:
+        add_evidence_line(evidence_lines, "NPI", npi)
     for value in source_values(body.alternate_names, limit=8, max_chars=160):
         alternate = person_name.normalize_person_name(value)
         if len(person_name.identity_tokens(alternate)) >= 2:
@@ -983,6 +993,21 @@ def get_resume(cid: int, resume_id: int):
     )
 
 # ---- enrichment ----
+def _nexus_blocked_lookup(eligibility: dict) -> dict:
+    return {
+        "status": "blocked", "emails": [], "phones": [], "phone_contacts": [],
+        "addresses": [], "resume_required": False, "location_match": None,
+        "nexus_eligibility": eligibility,
+    }
+
+
+def _check_nexus_candidate(candidate: dict, *, fresh: bool = False) -> dict:
+    try:
+        return nexus_eligibility.check_candidate(candidate, fresh=fresh)
+    except nexus_eligibility.NexusEligibilityUnavailable as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 def _quick_sourcer_selected() -> bool:
     """The public Medhunt product has one backend contact-lookup path."""
     return True
@@ -1026,15 +1051,23 @@ def _record_enrichment(request: Request | None, candidate_id: int, status: str,
 @app.post("/candidates/{cid}/contact-lookup")
 def enrich_one(cid: int, request: Request = None):
     _request_user(request)
-    if not store.get_candidate(cid):
+    candidate = store.get_candidate(cid)
+    if not candidate:
         raise HTTPException(404, "candidate not found")
+    eligibility = _check_nexus_candidate(candidate, fresh=True)
+    if eligibility.get("blocked"):
+        return _nexus_blocked_lookup(eligibility)
     result = quick_sourcer_client.lookup_candidate(cid)
+    eligibility = _check_nexus_candidate(store.get_candidate(cid) or candidate, fresh=True)
+    if eligibility.get("blocked"):
+        result = _nexus_blocked_lookup(eligibility)
     _record_enrichment(
         request, cid,
         result.get("status") or result.get("enrich_status") or "unknown",
         provider="quick_sourcer",
     )
-    nexus_delivery.queue_latest_resume_if_ready(cid)
+    if result.get("status") != "blocked":
+        nexus_delivery.queue_latest_resume_if_ready(cid)
     return result
 
 
@@ -1230,14 +1263,35 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
     """
     results = {}
     for candidate_id in dict.fromkeys(body.candidate_ids):
-        if not store.get_candidate(candidate_id):
+        candidate = store.get_candidate(candidate_id)
+        if not candidate:
             results[str(candidate_id)] = {
                 "status": "failed", "emails": [], "phones": [],
                 "phone_contacts": [], "resume_required": False, "location_match": None,
             }
             continue
         try:
+            eligibility = nexus_eligibility.check_candidate(candidate, fresh=True)
+            if eligibility.get("blocked"):
+                results[str(candidate_id)] = _nexus_blocked_lookup(eligibility)
+                continue
             results[str(candidate_id)] = quick_sourcer_client.lookup_candidate(candidate_id)
+            eligibility = nexus_eligibility.check_candidate(
+                store.get_candidate(candidate_id) or candidate, fresh=True,
+            )
+            if eligibility.get("blocked"):
+                results[str(candidate_id)] = _nexus_blocked_lookup(eligibility)
+                continue
+        except nexus_eligibility.NexusEligibilityUnavailable:
+            results[str(candidate_id)] = {
+                "status": "failed", "emails": [], "phones": [],
+                "phone_contacts": [], "resume_required": False,
+                "location_match": None,
+                "nexus_eligibility": {
+                    "state": "unavailable", "blocked": True, "checked": False,
+                },
+            }
+            continue
         except Exception as exc:
             # A malformed provider response or one database row must never turn
             # the entire selection into an HTTP 500. The panel can retry this
@@ -1325,7 +1379,34 @@ def _resolve_zoom_sms_sender(request: Request, *, strict: bool) -> dict | None:
     if healthboard_auth.enabled():
         token = str(getattr(request.state, "healthboard_extension_token", "") or "")
         try:
-            return healthboard_auth.medhunt_zoom_sms_sender(token)
+            sender = healthboard_auth.medhunt_zoom_sms_sender(token)
+            if sender and sender.get("employer_id"):
+                sender["access_token"] = healthboard_auth.organization_zoom_access(
+                    str(sender["employer_id"]),
+                )
+                if not sender["access_token"]:
+                    raise RuntimeError("The organization Zoom connection is unavailable")
+            return sender
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            try:
+                detail = str(exc.response.json().get("detail") or "")
+            except (ValueError, AttributeError):
+                detail = ""
+            logging.getLogger("medhunt.zoom_sms").warning(
+                "Halo rejected the recruiter Zoom sender assignment (%s).", status,
+            )
+            if strict and status in {401, 403, 404, 409, 422}:
+                raise HTTPException(
+                    status,
+                    detail or "Your Halo administrator has not enabled Zoom messaging for your account.",
+                ) from exc
+            if strict:
+                raise HTTPException(
+                    503,
+                    "Could not verify your Zoom sender assignment. Try again or contact your Halo administrator.",
+                ) from exc
+            return None
         except Exception as exc:
             logging.getLogger("medhunt.zoom_sms").warning(
                 "Could not load the recruiter Zoom sender assignment (%s).",
@@ -1351,6 +1432,12 @@ def sms_preview(candidate_id: int, phone: str, request: Request):
     candidate = store.get_candidate(candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
+    eligibility = _check_nexus_candidate(candidate, fresh=True)
+    if eligibility.get("blocked"):
+        return {
+            "phone": phone, "opted_out": False, "already_contacted": False,
+            "nexus_blocked": True, "nexus_eligibility": eligibility,
+        }
     verified_phone = _candidate_sms_phone(candidate, phone)
     return {
         "phone": verified_phone,
@@ -1373,6 +1460,13 @@ def send_sms(body: SmsSendIn, request: Request):
     candidate = store.get_candidate(body.candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
+    eligibility = _check_nexus_candidate(candidate, fresh=True)
+    if eligibility.get("blocked"):
+        owner = str(eligibility.get("recruiter") or "another recruiter")
+        status = str(eligibility.get("status") or "active")
+        raise HTTPException(
+            409, f"This candidate is already {status} in Nexus under {owner}.",
+        )
     phone = _candidate_sms_phone(candidate, body.phone)
     if store.is_dnc(phone):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
@@ -1421,6 +1515,7 @@ def send_sms(body: SmsSendIn, request: Request):
             phone, text,
             sender_number=str(zoom_sender["sender_number"]),
             sender_user_id=str(zoom_sender["zoom_user_id"]),
+            access_token=str(zoom_sender.get("access_token") or ""),
         )
         zoom_message_id = str(result.get("message_id") or result.get("id") or "")
         session_id = str(result.get("session_id") or "")

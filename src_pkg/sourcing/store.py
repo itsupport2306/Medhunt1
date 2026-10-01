@@ -119,6 +119,9 @@ CREATE TABLE IF NOT EXISTS lookup_run_items(
 CREATE TABLE IF NOT EXISTS nexus_candidate_links(
   identity_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
   nexus_candidate_id TEXT NOT NULL UNIQUE, created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
+  candidate_id INTEGER PRIMARY KEY, identity_key TEXT NOT NULL,
+  blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}', checked REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS nexus_deliveries(
   id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER NOT NULL,
   resume_id INTEGER NOT NULL UNIQUE, identity_key TEXT NOT NULL,
@@ -306,6 +309,11 @@ _POSTGRES_SCHEMA = (
          event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
          created DOUBLE PRECISION
        )""",
+    """CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
+         candidate_id BIGINT PRIMARY KEY, identity_key TEXT NOT NULL,
+         blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}',
+         checked DOUBLE PRECISION NOT NULL
+       )""",
     """CREATE TABLE IF NOT EXISTS sms_outreach_claims(
          candidate_id BIGINT PRIMARY KEY, phone_key TEXT NOT NULL,
          status TEXT DEFAULT 'sending', created DOUBLE PRECISION,
@@ -398,7 +406,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "users", "enrichment_events", "jobs", "candidates", "outreach", "talent_pools", "talent_pool_members",
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
     "provider_lookups", "lookup_runs", "lookup_run_items",
-    "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
+    "nexus_candidate_links", "nexus_candidate_checks", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
     "sms_outreach_claims",
@@ -748,6 +756,43 @@ def get_candidate(candidate_id):
             "SELECT * FROM candidates WHERE id=?", (candidate_id,)
         ).fetchone()
         return _row(row) if row else None
+
+
+def get_nexus_candidate_check(candidate_id: int):
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM nexus_candidate_checks WHERE candidate_id=?",
+            (int(candidate_id),),
+        ).fetchone()
+    if not row:
+        return None
+    data = dict(row)
+    try:
+        data["result"] = json.loads(data.get("result") or "{}")
+    except (TypeError, ValueError):
+        data["result"] = {}
+    data["blocked"] = bool(data.get("blocked"))
+    return data
+
+
+def save_nexus_candidate_check(
+    candidate_id: int, identity_key: str, result: dict, checked: float | None = None,
+):
+    checked_at = float(checked or time.time())
+    blocked = int(bool(result.get("blocked")))
+    payload = json.dumps(result, separators=(",", ":"))
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO nexus_candidate_checks(
+                 candidate_id,identity_key,blocked,result,checked
+               ) VALUES(?,?,?,?,?)
+               ON CONFLICT(candidate_id) DO UPDATE SET
+                 identity_key=excluded.identity_key, blocked=excluded.blocked,
+                 result=excluded.result, checked=excluded.checked""",
+            (int(candidate_id), identity_key, blocked, payload, checked_at),
+        )
+    return {"candidate_id": int(candidate_id), "identity_key": identity_key,
+            "blocked": bool(blocked), "result": result, "checked": checked_at}
 
 
 def get_candidate_by_source(source, source_id):

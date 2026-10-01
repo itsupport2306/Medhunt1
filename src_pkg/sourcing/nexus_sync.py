@@ -153,7 +153,12 @@ class NexusSettings:
                     getattr(config_module, "NEXUS_ENABLED", False),
                 )
             ),
-            base_url=str(getattr(config_module, "NEXUS_BASE_URL", "") or "").rstrip("/"),
+            base_url=str(
+                getattr(
+                    config_module, "NEXUS_API_BASE_URL",
+                    getattr(config_module, "NEXUS_BASE_URL", ""),
+                ) or ""
+            ).rstrip("/"),
             auth_method=str(getattr(config_module, "NEXUS_AUTH_METHOD", "static") or "static").lower(),
             token_url=str(getattr(config_module, "NEXUS_TOKEN_URL", "") or ""),
             token_payload_style=str(
@@ -472,16 +477,20 @@ class NexusClient:
             raise _response_error(response, operation=operation, write=write)
         return response
 
-    def search_candidates(self, *, email: str = "", phone: str = "") -> list[dict[str, Any]]:
-        if bool(email) == bool(phone):
+    def search_candidates(
+        self, *, email: str = "", phone: str = "", npi: str = ""
+    ) -> list[dict[str, Any]]:
+        supplied = [bool(email), bool(phone), bool(npi)]
+        if sum(supplied) != 1:
             raise NexusPermanentError(
-                "A duplicate search must contain exactly one contact value.",
+                "A duplicate search must contain exactly one identity value.",
                 operation="duplicate_search",
             )
         payload: dict[str, Any] = {
             "pagingSortingDetails": {"start": 0, "maxRowsToFetch": 20}
         }
-        payload["email" if email else "phone"] = email or phone
+        key = "email" if email else "phone" if phone else "npi"
+        payload[key] = email or phone or npi
         response = self.request(
             "POST",
             "/api/api-integration/v1/candidates/search",
