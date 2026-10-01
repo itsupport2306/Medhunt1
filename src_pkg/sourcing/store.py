@@ -2689,6 +2689,17 @@ def create_sms_message(conversation_id, direction, body, request_id="", status="
         return dict(row), True
 
 
+def get_sms_message_by_request_id(request_id):
+    request_key = str(request_id or "").strip()
+    if not request_key:
+        return None
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM sms_messages WHERE request_id=?", (request_key,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 def update_sms_message(message_id, *, status, zoom_message_id="", failure_reason=""):
     now = time.time()
     with _conn() as connection:

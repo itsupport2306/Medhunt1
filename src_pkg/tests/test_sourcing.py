@@ -3260,7 +3260,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.26.4"
+            assert health_body["version"] == api_module.APP_VERSION
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3728,7 +3728,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.26.4"
+    assert manifest["version"] == api_module.APP_VERSION
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -4275,7 +4275,7 @@ def test_frontend_locks_captured_candidates_during_lookup():
     assert "context.nameElement, context.root, true" in content_script
 
 
-def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
+def test_zoom_sms_sends_directly_and_is_idempotent(monkeypatch):
     store.reset()
     candidate_id = store.add_candidate("Taylor Nurse", "Atlanta, GA", source="sharecare")
     quick_sourcer_client.apply_to_candidate(candidate_id, {
@@ -4288,9 +4288,8 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
     })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: {
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-user-1")
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **kwargs: {
         "message_id": "zoom-message-1", "session_id": "zoom-session-1",
     })
 
@@ -4303,20 +4302,6 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
                 "message": "Hi Taylor, are you open to an opportunity?",
                 "request_id": "sms-test-request-1",
             }
-            blocked = await client.post("/messaging/sms", json=body)
-            assert blocked.status_code == 409
-
-            consent = await client.post(
-                f"/candidates/{candidate_id}/sms-consent",
-                json={
-                    "phone": "+14045550123", "status": "opted_in",
-                    "source": "application", "evidence": "Application form 2026-09-18",
-                    "disclosure_version": "medhunt-sms-v1",
-                },
-            )
-            assert consent.status_code == 200
-            assert consent.json()["consent"]["status"] == "opted_in"
-
             sent = await client.post("/messaging/sms", json=body)
             assert sent.status_code == 200, sent.text
             conversation = sent.json()["conversation"]
@@ -4361,7 +4346,7 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
     asyncio.run(exercise())
 
 
-def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeypatch):
+def test_zoom_sms_direct_send_does_not_require_a_test_number_allowlist(monkeypatch):
     store.reset()
     allowed_id = store.add_candidate("Owned Test Phone", "Atlanta, GA", source="test")
     blocked_id = store.add_candidate("Unlisted Phone", "Atlanta, GA", source="test")
@@ -4376,10 +4361,9 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
         })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", True)
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ("+1 (404) 555-0123",))
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-user-1")
     calls = []
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **kwargs: (
         calls.append((phone, message)) or {
             "message_id": "zoom-test-message", "session_id": "zoom-test-session",
         }
@@ -4388,13 +4372,6 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
     async def exercise():
         transport = httpx.ASGITransport(app=api_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            consent_state = await client.get(
-                f"/candidates/{allowed_id}/sms-consent",
-                params={"phone": "+14045550123"},
-            )
-            assert consent_state.status_code == 200
-            assert consent_state.json()["test_mode_bypass"] is True
-
             sent = await client.post("/messaging/sms", json={
                 "candidate_id": allowed_id, "phone": "+14045550123",
                 "message": "Test message", "request_id": "allowlisted-test-message",
@@ -4402,17 +4379,17 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
             assert sent.status_code == 200, sent.text
             assert len(calls) == 1
 
-            blocked = await client.post("/messaging/sms", json={
+            second = await client.post("/messaging/sms", json={
                 "candidate_id": blocked_id, "phone": "+14045550124",
-                "message": "This must not send", "request_id": "unlisted-test-message",
+                "message": "A second verified candidate", "request_id": "unlisted-test-message",
             })
-            assert blocked.status_code == 409
-            assert len(calls) == 1
+            assert second.status_code == 200
+            assert len(calls) == 2
 
     asyncio.run(exercise())
 
 
-def test_zoom_sms_opt_in_request_unlocks_outreach_after_start_reply(monkeypatch):
+def test_zoom_sms_rejects_messages_over_29_words_before_calling_zoom(monkeypatch):
     store.reset()
     candidate_id = store.add_candidate("Morgan Clinician", "Seattle, WA", source="medifind")
     quick_sourcer_client.apply_to_candidate(candidate_id, {
@@ -4422,64 +4399,24 @@ def test_zoom_sms_opt_in_request_unlocks_outreach_after_start_reply(monkeypatch)
     })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+12065550999")
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
-    monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
-    monkeypatch.setattr(config, "ZOOM_WEBHOOK_SECRET_TOKEN", "webhook-secret")
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-user-2")
     sent_messages = []
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **kwargs: (
         sent_messages.append((phone, message)) or {
-            "message_id": f"zoom-{len(sent_messages)}", "session_id": "zoom-opt-in-session",
+            "message_id": f"zoom-{len(sent_messages)}", "session_id": "zoom-session",
         }
     ))
 
     async def exercise():
         transport = httpx.ASGITransport(app=api_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            request_result = await client.post("/messaging/sms/opt-in-request", json={
+            response = await client.post("/messaging/sms", json={
                 "candidate_id": candidate_id, "phone": "+12065550123",
-                "request_id": "opt-in-request-1",
+                "message": " ".join(f"word{index}" for index in range(30)),
+                "request_id": "over-word-limit",
             })
-            assert request_result.status_code == 200, request_result.text
-            assert request_result.json()["conversation"]["status"] == "awaiting_opt_in"
-            assert "Reply START" in sent_messages[0][1]
-            assert "Reply STOP" in sent_messages[0][1]
-
-            pitch_before_opt_in = await client.post("/messaging/sms", json={
-                "candidate_id": candidate_id, "phone": "+12065550123",
-                "message": "Are you open to a role?", "request_id": "pitch-before-opt-in",
-            })
-            assert pitch_before_opt_in.status_code == 409
-
-            incoming = {
-                "event": "phone.sms_received", "event_ts": int(time.time() * 1000),
-                "payload": {"object": {
-                    "message_id": "zoom-inbound-start", "session_id": "zoom-opt-in-session",
-                    "message": "START", "sender": {"phone_number": "+12065550123"},
-                    "to_members": [{"phone_number": "+12065550999"}],
-                }},
-            }
-            raw = json.dumps(incoming, separators=(",", ":")).encode()
-            timestamp = str(int(time.time()))
-            signature = "v0=" + hmac.new(
-                b"webhook-secret", b"v0:" + timestamp.encode() + b":" + raw,
-                hashlib.sha256,
-            ).hexdigest()
-            webhook = await client.post(
-                "/integrations/zoom/webhook", content=raw,
-                headers={
-                    "Content-Type": "application/json",
-                    "x-zm-request-timestamp": timestamp,
-                    "x-zm-signature": signature,
-                },
-            )
-            assert webhook.status_code == 200, webhook.text
-            assert store.get_sms_consent(candidate_id, "+12065550123")["status"] == "opted_in"
-
-            pitch = await client.post("/messaging/sms", json={
-                "candidate_id": candidate_id, "phone": "+12065550123",
-                "message": "Are you open to a role?", "request_id": "pitch-after-opt-in",
-            })
-            assert pitch.status_code == 200, pitch.text
-            assert len(sent_messages) == 2
+            assert response.status_code == 422
+            assert "29 words" in response.json()["detail"]
+            assert sent_messages == []
 
     asyncio.run(exercise())

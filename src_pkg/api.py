@@ -1381,21 +1381,36 @@ def send_sms(body: SmsSendIn, request: Request):
         raise HTTPException(400, "Write a message before sending.")
     if len(text.split()) > 29:
         raise HTTPException(422, "SMS messages are limited to 29 words.")
-    if store.sms_candidate_contacted(body.candidate_id):
-        raise HTTPException(409, "This candidate has already received SMS outreach.")
-    if not store.claim_sms_outreach(body.candidate_id, phone):
-        raise HTTPException(409, "This candidate has already received SMS outreach.")
     if "reply stop" not in text.casefold():
         text = f"{text}\n\nMedhunt recruiting. Reply STOP to opt out."
     if len(text) > 500:
         raise HTTPException(400, "Message is too long after the required opt-out notice.")
+    request_id = body.request_id.strip() or uuid.uuid4().hex
+    existing_message = store.get_sms_message_by_request_id(request_id)
+    if existing_message:
+        existing_conversation = store.get_sms_conversation(
+            existing_message["conversation_id"]
+        )
+        same_request = bool(
+            existing_conversation
+            and int(existing_conversation.get("candidate_id") or 0) == body.candidate_id
+            and str(existing_conversation.get("phone_key") or "") == store.contact_key(phone)
+            and str(existing_conversation.get("initiated_by") or "") == str(user.get("sub") or "")
+            and str(existing_message.get("body") or "") == text
+        )
+        if not same_request:
+            raise HTTPException(409, "This SMS request ID has already been used.")
+        return {"conversation": existing_conversation, "message": existing_message}
+    if store.sms_candidate_contacted(body.candidate_id):
+        raise HTTPException(409, "This candidate has already received SMS outreach.")
+    if not store.claim_sms_outreach(body.candidate_id, phone):
+        raise HTTPException(409, "This candidate has already received SMS outreach.")
     conversation = store.get_or_create_sms_conversation(
         body.candidate_id, phone,
         candidate_name=str(candidate.get("name") or ""),
         initiated_by=str(user.get("sub") or ""),
         sender_number=str(zoom_sender["sender_number"]),
     )
-    request_id = body.request_id.strip() or uuid.uuid4().hex
     message, created = store.create_sms_message(
         conversation["id"], "outbound", text, request_id=request_id,
     )
