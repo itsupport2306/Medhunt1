@@ -58,12 +58,15 @@ CREATE TABLE IF NOT EXISTS sms_conversations(
   candidate_phone TEXT NOT NULL, phone_key TEXT NOT NULL,
   initiated_by TEXT DEFAULT '', assigned_recruiter_id TEXT DEFAULT '',
   assigned_recruiter_email TEXT DEFAULT '', assigned_recruiter_name TEXT DEFAULT '',
-  zoom_sender_number TEXT DEFAULT '', zoom_session_id TEXT DEFAULT '',
+  zoom_sender_number TEXT DEFAULT '', zoom_sender_user_id TEXT DEFAULT '',
+  zoom_session_id TEXT DEFAULT '',
   status TEXT DEFAULT 'open', created REAL, updated REAL, last_message_at REAL);
 CREATE TABLE IF NOT EXISTS sms_messages(
   id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL,
   direction TEXT NOT NULL, body TEXT NOT NULL, status TEXT DEFAULT 'queued',
   zoom_message_id TEXT DEFAULT '', request_id TEXT UNIQUE,
+  sender_user_id TEXT DEFAULT '', sender_name TEXT DEFAULT '',
+  sender_number TEXT DEFAULT '', zoom_user_id TEXT DEFAULT '',
   failure_reason TEXT DEFAULT '', created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS sms_webhook_events(
   event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL);
@@ -314,7 +317,8 @@ _POSTGRES_SCHEMA = (
          candidate_phone TEXT NOT NULL, phone_key TEXT NOT NULL,
          initiated_by TEXT DEFAULT '', assigned_recruiter_id TEXT DEFAULT '',
          assigned_recruiter_email TEXT DEFAULT '', assigned_recruiter_name TEXT DEFAULT '',
-         zoom_sender_number TEXT DEFAULT '', zoom_session_id TEXT DEFAULT '',
+         zoom_sender_number TEXT DEFAULT '', zoom_sender_user_id TEXT DEFAULT '',
+         zoom_session_id TEXT DEFAULT '',
          status TEXT DEFAULT 'open', created DOUBLE PRECISION,
          updated DOUBLE PRECISION, last_message_at DOUBLE PRECISION
        )""",
@@ -322,6 +326,8 @@ _POSTGRES_SCHEMA = (
          id BIGSERIAL PRIMARY KEY, conversation_id BIGINT NOT NULL,
          direction TEXT NOT NULL, body TEXT NOT NULL, status TEXT DEFAULT 'queued',
          zoom_message_id TEXT DEFAULT '', request_id TEXT UNIQUE,
+         sender_user_id TEXT DEFAULT '', sender_name TEXT DEFAULT '',
+         sender_number TEXT DEFAULT '', zoom_user_id TEXT DEFAULT '',
          failure_reason TEXT DEFAULT '', created DOUBLE PRECISION,
          updated DOUBLE PRECISION
        )""",
@@ -366,6 +372,11 @@ _POSTGRES_SCHEMA = (
     # nullable so historical rows are preserved; all current writes supply the
     # candidate id.
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE sms_conversations ADD COLUMN IF NOT EXISTS zoom_sender_user_id TEXT DEFAULT ''",
+    "ALTER TABLE sms_messages ADD COLUMN IF NOT EXISTS sender_user_id TEXT DEFAULT ''",
+    "ALTER TABLE sms_messages ADD COLUMN IF NOT EXISTS sender_name TEXT DEFAULT ''",
+    "ALTER TABLE sms_messages ADD COLUMN IF NOT EXISTS sender_number TEXT DEFAULT ''",
+    "ALTER TABLE sms_messages ADD COLUMN IF NOT EXISTS zoom_user_id TEXT DEFAULT ''",
     "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE campaign_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
@@ -483,6 +494,8 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "nexus_candidate_links": ("candidate_id",),
     "resume_capture_locks": ("candidate_id",),
     "nexus_deliveries": ("candidate_id",),
+    "sms_conversations": ("zoom_sender_user_id",),
+    "sms_messages": ("sender_user_id", "sender_name", "sender_number", "zoom_user_id"),
 }
 _POSTGRES_REQUIRED_INDEXES = (
     "idx_enrichment_events_user", "idx_enrichment_events_candidate",
@@ -677,6 +690,19 @@ def _conn():
         ):
             if name not in resume_columns:
                 raw.execute(f"ALTER TABLE resumes ADD COLUMN {name} {definition}")
+        conversation_columns = {
+            row["name"] for row in raw.execute("PRAGMA table_info(sms_conversations)")
+        }
+        if "zoom_sender_user_id" not in conversation_columns:
+            raw.execute(
+                "ALTER TABLE sms_conversations ADD COLUMN zoom_sender_user_id TEXT DEFAULT ''"
+            )
+        message_columns = {
+            row["name"] for row in raw.execute("PRAGMA table_info(sms_messages)")
+        }
+        for name in ("sender_user_id", "sender_name", "sender_number", "zoom_user_id"):
+            if name not in message_columns:
+                raw.execute(f"ALTER TABLE sms_messages ADD COLUMN {name} TEXT DEFAULT ''")
         yield connection
         raw.commit()
     except Exception:
@@ -3118,7 +3144,7 @@ def candidate_nexus_id(candidate_id):
 
 
 def get_or_create_sms_conversation(candidate_id, phone, *, candidate_name="",
-                                   initiated_by="", sender_number=""):
+                                   initiated_by="", sender_number="", sender_user_id=""):
     phone_value = str(phone or "").strip()
     key = contact_key(phone_value)
     now = time.time()
@@ -3135,12 +3161,13 @@ def get_or_create_sms_conversation(candidate_id, phone, *, candidate_name="",
             connection,
             """INSERT INTO sms_conversations(
                  candidate_id,nexus_candidate_id,candidate_name,candidate_phone,phone_key,
-                 initiated_by,zoom_sender_number,status,created,updated,last_message_at
-               ) VALUES(?,?,?,?,?,?,?,'open',?,?,?)""",
+                 initiated_by,zoom_sender_number,zoom_sender_user_id,status,created,updated,last_message_at
+               ) VALUES(?,?,?,?,?,?,?,?,'open',?,?,?)""",
             (
                 int(candidate_id), candidate_nexus_id(candidate_id),
                 str(candidate_name or "")[:320], phone_value, key,
                 str(initiated_by or "")[:320], str(sender_number or "")[:50],
+                str(sender_user_id or "")[:80],
                 now, now, now,
             ),
         )
@@ -3150,7 +3177,8 @@ def get_or_create_sms_conversation(candidate_id, phone, *, candidate_name="",
         return dict(row)
 
 
-def create_sms_message(conversation_id, direction, body, request_id="", status="queued"):
+def create_sms_message(conversation_id, direction, body, request_id="", status="queued",
+                       sender_user_id="", sender_name="", sender_number="", zoom_user_id=""):
     now = time.time()
     request_key = str(request_id or "").strip() or None
     with _conn() as connection:
@@ -3163,11 +3191,13 @@ def create_sms_message(conversation_id, direction, body, request_id="", status="
         message_id = _insert_id(
             connection,
             """INSERT INTO sms_messages(
-                 conversation_id,direction,body,status,request_id,created,updated
-               ) VALUES(?,?,?,?,?,?,?)""",
+                 conversation_id,direction,body,status,request_id,sender_user_id,sender_name,
+                 sender_number,zoom_user_id,created,updated
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 int(conversation_id), str(direction), str(body), str(status),
-                request_key, now, now,
+                request_key, str(sender_user_id or "")[:80], str(sender_name or "")[:160],
+                str(sender_number or "")[:50], str(zoom_user_id or "")[:80], now, now,
             ),
         )
         connection.execute(
@@ -3203,7 +3233,7 @@ def update_sms_message(message_id, *, status, zoom_message_id="", failure_reason
 
 def update_sms_conversation(conversation_id, **fields):
     allowed = {
-        "zoom_session_id", "status", "assigned_recruiter_id",
+        "zoom_session_id", "zoom_sender_number", "zoom_sender_user_id", "status", "assigned_recruiter_id",
         "assigned_recruiter_email", "assigned_recruiter_name",
     }
     values = {key: str(value or "") for key, value in fields.items() if key in allowed}
@@ -3234,17 +3264,39 @@ def get_sms_conversation(conversation_id):
         return result
 
 
-def list_sms_conversations(user_id="", *, include_all=False):
+def list_sms_conversations(user_id="", *, user_ids=None, include_all=False):
+    projection = """SELECT c.*,
+        EXISTS(SELECT 1 FROM sms_messages m WHERE m.conversation_id=c.id
+               AND m.direction='inbound') AS has_reply,
+        (SELECT MAX(m.created) FROM sms_messages m WHERE m.conversation_id=c.id
+         AND m.direction='inbound') AS last_reply_at,
+        (SELECT MAX(m.created) FROM sms_messages m WHERE m.conversation_id=c.id
+         AND m.direction='outbound' AND m.status IN ('accepted','sent','delivered')) AS last_outbound_at,
+        (SELECT m.sender_user_id FROM sms_messages m WHERE m.conversation_id=c.id
+         AND m.direction='outbound' AND m.status IN ('accepted','sent','delivered')
+         ORDER BY m.created DESC LIMIT 1) AS last_outbound_user_id
+        FROM sms_conversations c"""
     with _conn() as connection:
-        if include_all or not user_id:
+        scoped_ids = sorted({str(value or "").strip() for value in (user_ids or [])
+                             if str(value or "").strip()})
+        if include_all or (user_ids is None and not user_id):
             rows = connection.execute(
-                "SELECT * FROM sms_conversations ORDER BY updated DESC"
+                projection + " ORDER BY c.updated DESC"
+            ).fetchall()
+        elif user_ids is not None:
+            if not scoped_ids:
+                return []
+            placeholders = ",".join("?" for _ in scoped_ids)
+            rows = connection.execute(
+                projection + f" WHERE c.initiated_by IN ({placeholders})"
+                f" OR c.assigned_recruiter_id IN ({placeholders})"
+                " ORDER BY c.updated DESC",
+                (*scoped_ids, *scoped_ids),
             ).fetchall()
         else:
             rows = connection.execute(
-                """SELECT * FROM sms_conversations
-                   WHERE initiated_by=? OR assigned_recruiter_id=?
-                   ORDER BY updated DESC""",
+                projection + " WHERE c.initiated_by=? OR c.assigned_recruiter_id=?"
+                " ORDER BY c.updated DESC",
                 (str(user_id), str(user_id)),
             ).fetchall()
         return [dict(row) for row in rows]

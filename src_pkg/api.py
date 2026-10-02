@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.1"
+APP_VERSION = "3.36.2"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -354,6 +354,31 @@ class SmsSendIn(BaseModel):
 
 class SmsAssignIn(BaseModel):
     recruiter_user_id: str = Field(min_length=1, max_length=200)
+
+
+class HaloScopeIn(BaseModel):
+    user_ids: list[str] = Field(default_factory=list, max_length=1000)
+    all_users: bool = False
+
+
+class HaloDeviceActionIn(HaloScopeIn):
+    actor_user_id: str = Field(min_length=1, max_length=80)
+
+
+class HaloConversationAssignmentIn(HaloScopeIn):
+    actor_user_id: str = Field(min_length=1, max_length=80)
+    recruiter_user_id: str = Field(min_length=1, max_length=80)
+    recruiter_email: str = Field(default="", max_length=320)
+    recruiter_name: str = Field(default="", max_length=320)
+
+
+class HaloConversationReplyIn(HaloScopeIn):
+    actor_user_id: str = Field(min_length=1, max_length=80)
+    actor_name: str = Field(default="", max_length=320)
+    message: str = Field(min_length=1, max_length=500)
+    sender_number: str = Field(min_length=7, max_length=40)
+    zoom_user_id: str = Field(min_length=1, max_length=80)
+    request_id: str = Field(default="", max_length=120)
 
 
 class DncIn(BaseModel):
@@ -669,6 +694,146 @@ def auth_me(request: Request):
             "role": claims.get("role", ""),
         },
     }
+
+
+def _halo_conversation_in_scope(conversation: dict, scope: HaloScopeIn) -> bool:
+    if scope.all_users:
+        return True
+    users = {str(value) for value in scope.user_ids}
+    return bool(users & {
+        str(conversation.get("initiated_by") or ""),
+        str(conversation.get("assigned_recruiter_id") or ""),
+    })
+
+
+def _halo_conversation_public(conversation: dict, *, include_messages=False) -> dict:
+    if not conversation:
+        return {}
+    fields = (
+        "id", "candidate_id", "nexus_candidate_id", "candidate_name",
+        "candidate_phone", "initiated_by", "assigned_recruiter_id",
+        "assigned_recruiter_email", "assigned_recruiter_name", "status",
+        "created", "updated", "last_message_at", "has_reply", "last_reply_at",
+        "last_outbound_at", "last_outbound_user_id",
+    )
+    result = {key: conversation.get(key) for key in fields if key in conversation}
+    if include_messages:
+        result["messages"] = [{
+            key: message.get(key) for key in (
+                "id", "direction", "body", "status", "sender_user_id",
+                "sender_name", "sender_number", "created", "updated",
+            ) if key in message
+        } for message in conversation.get("messages") or []]
+    return result
+
+
+@app.post("/internal/halo/devices")
+def halo_devices(scope: HaloScopeIn):
+    # Medhunt1 uses Halo email-code sessions and intentionally has no separate
+    # device approval registry. Keep the Halo dashboard contract explicit.
+    return {"items": [], "multi_device_accounts": []}
+
+
+@app.post("/internal/halo/devices/{device_id}/approve")
+def halo_approve_device(device_id: int, body: HaloDeviceActionIn):
+    raise HTTPException(404, "Device request not found.")
+
+
+@app.post("/internal/halo/conversations")
+def halo_conversations(scope: HaloScopeIn):
+    items = store.list_sms_conversations(
+        user_ids=scope.user_ids,
+        include_all=scope.all_users,
+    )
+    return {"items": [_halo_conversation_public(item) for item in items]}
+
+
+@app.post("/internal/halo/conversations/{conversation_id}")
+def halo_conversation(conversation_id: int, scope: HaloScopeIn):
+    conversation = store.get_sms_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "SMS conversation not found.")
+    if not _halo_conversation_in_scope(conversation, scope):
+        raise HTTPException(403, "Conversation is outside the requested organization scope.")
+    return _halo_conversation_public(conversation, include_messages=True)
+
+
+@app.post("/internal/halo/conversations/{conversation_id}/assign")
+def halo_assign_conversation(conversation_id: int, body: HaloConversationAssignmentIn):
+    conversation = store.get_sms_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "SMS conversation not found.")
+    if not _halo_conversation_in_scope(conversation, body):
+        raise HTTPException(403, "Conversation is outside the requested organization scope.")
+    if conversation.get("status") == "opted_out":
+        raise HTTPException(409, "An opted-out candidate cannot be reassigned for outreach.")
+    messages = conversation.get("messages") or []
+    last_reply = max((float(message.get("created") or 0) for message in messages
+                      if message.get("direction") == "inbound"), default=0)
+    last_outbound = max((float(message.get("created") or 0) for message in messages
+                         if message.get("direction") == "outbound"
+                         and message.get("status") in {"accepted", "sent", "delivered"}),
+                        default=0)
+    if not last_reply:
+        raise HTTPException(409, "Wait for a candidate reply before assigning.")
+    if last_outbound > last_reply:
+        raise HTTPException(409, "This conversation has already been answered.")
+    conversation = store.update_sms_conversation(
+        conversation_id,
+        assigned_recruiter_id=body.recruiter_user_id,
+        assigned_recruiter_email=body.recruiter_email,
+        assigned_recruiter_name=body.recruiter_name,
+    )
+    return {"conversation": _halo_conversation_public(conversation, include_messages=True)}
+
+
+@app.post("/internal/halo/conversations/{conversation_id}/reply")
+def halo_reply_to_conversation(conversation_id: int, body: HaloConversationReplyIn):
+    conversation = store.get_sms_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(404, "SMS conversation not found.")
+    if not _halo_conversation_in_scope(conversation, body):
+        raise HTTPException(403, "Conversation is outside the requested organization scope.")
+    if conversation.get("status") == "opted_out":
+        raise HTTPException(409, "This candidate opted out of SMS.")
+    messages = conversation.get("messages") or []
+    last_reply = max((float(message.get("created") or 0) for message in messages
+                      if message.get("direction") == "inbound"), default=0)
+    last_outbound = max((float(message.get("created") or 0) for message in messages
+                         if message.get("direction") == "outbound"
+                         and message.get("status") in {"accepted", "sent", "delivered"}),
+                        default=0)
+    if not last_reply:
+        raise HTTPException(409, "Wait for a candidate reply before replying.")
+    if last_outbound > last_reply:
+        raise HTTPException(409, "This candidate has already received a reply to their latest message.")
+    text = body.message.strip()
+    if not text:
+        raise HTTPException(422, "Reply cannot be blank.")
+    request_id = body.request_id.strip() or uuid.uuid4().hex
+    message, created = store.create_sms_message(
+        conversation_id, "outbound", text, request_id=request_id,
+        sender_user_id=body.actor_user_id, sender_name=body.actor_name,
+        sender_number=body.sender_number, zoom_user_id=body.zoom_user_id,
+    )
+    if created:
+        try:
+            result = zoom_sms.send_sms(
+                conversation["candidate_phone"], text,
+                sender_number=body.sender_number,
+                sender_user_id=body.zoom_user_id,
+            )
+            message_id = str(
+                result.get("message_id") or result.get("id") or result.get("sid") or ""
+            )
+            store.update_sms_message(message["id"], status="accepted", zoom_message_id=message_id)
+        except zoom_sms.ZoomSmsError as exc:
+            store.update_sms_message(
+                message["id"], status="failed", failure_reason=str(exc),
+            )
+            raise HTTPException(502, str(exc)) from exc
+    conversation = store.get_sms_conversation(conversation_id)
+    return _halo_conversation_public(conversation, include_messages=True)
 
 
 @app.get("/analytics/me")
@@ -1611,9 +1776,14 @@ def send_sms(body: SmsSendIn, request: Request):
         candidate_name=str(candidate.get("name") or ""),
         initiated_by=str(user.get("sub") or ""),
         sender_number=str(zoom_sender["sender_number"]),
+        sender_user_id=str(zoom_sender["zoom_user_id"]),
     )
     message, created = store.create_sms_message(
         conversation["id"], "outbound", text, request_id=request_id,
+        sender_user_id=str(user.get("sub") or ""),
+        sender_name=str(user.get("email") or user.get("name") or ""),
+        sender_number=str(zoom_sender["sender_number"]),
+        zoom_user_id=str(zoom_sender["zoom_user_id"]),
     )
     if not created:
         return {"conversation": store.get_sms_conversation(conversation["id"]), "message": message}
