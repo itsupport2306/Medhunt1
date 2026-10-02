@@ -8,7 +8,7 @@ import time
 from dataclasses import replace
 from typing import Any, Mapping
 
-from . import config, store
+from . import config, store, verification
 from .nexus_sync import NexusClient, NexusDeliveryError, NexusSettings
 
 
@@ -66,11 +66,20 @@ def candidate_identifiers(candidate: Mapping[str, Any]) -> dict[str, list[str]]:
     return {"emails": emails[:2], "phones": phones[:2], "npis": npis[:1]}
 
 
-def _identity_key(identifiers: Mapping[str, list[str]]) -> str:
+def _identity_key(
+    identifiers: Mapping[str, list[str]], candidate: Mapping[str, Any] | None = None,
+) -> str:
     stable = "|".join(
         f"{kind}:{value}" for kind in ("emails", "phones", "npis")
         for value in sorted(identifiers.get(kind) or [])
     )
+    candidate = candidate or {}
+    stable += "|name:" + " ".join(re.findall(
+        r"[a-z0-9]+", str(candidate.get("name") or candidate.get("canonical_name") or "").casefold(),
+    ))
+    stable += "|location:" + " ".join(re.findall(
+        r"[a-z0-9]+", str(candidate.get("location") or "").casefold(),
+    ))
     return hashlib.sha256(stable.encode()).hexdigest() if stable else "none"
 
 
@@ -89,11 +98,42 @@ def _record_summary(record: Mapping[str, Any], matched_by: list[str]) -> dict[st
     }
 
 
+def _identity_match(candidate: Mapping[str, Any], record: Mapping[str, Any]) -> bool | None:
+    """Compare Nexus contact hits against all four requested identity fields.
+
+    ``None`` means Nexus omitted data needed to verify the hit. A contact match
+    by itself is not enough to tell a recruiter that this is their candidate.
+    """
+    expected_name = str(candidate.get("name") or candidate.get("canonical_name") or "")
+    returned_name = str(
+        record.get("name") or record.get("fullName") or record.get("candidateName") or ""
+    ).strip()
+    if not returned_name:
+        returned_name = " ".join(filter(None, (
+            str(record.get("firstName") or record.get("first_name") or "").strip(),
+            str(record.get("lastName") or record.get("last_name") or "").strip(),
+        )))
+    expected_location = str(candidate.get("location") or "")
+    returned_city = str(record.get("city") or record.get("cityName") or "").strip()
+    returned_state = str(
+        record.get("state") or record.get("stateName") or record.get("stateCode") or ""
+    ).strip()
+    returned_location = str(record.get("location") or "").strip()
+    if returned_city and returned_state:
+        returned_location = f"{returned_city}, {returned_state}"
+    if not (expected_name and returned_name and verification.us_city_state(expected_location)
+            and verification.us_city_state(returned_location)):
+        return None
+    name_match = verification.name_evidence(expected_name, returned_name)
+    location_match = verification.location_evidence(expected_location, [returned_location])
+    return bool(name_match.get("exact") and location_match.get("exact"))
+
+
 def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dict[str, Any]:
     if not enabled():
         return {"state": "disabled", "blocked": False, "checked": False}
     identifiers = candidate_identifiers(candidate)
-    identity_key = _identity_key(identifiers)
+    identity_key = _identity_key(identifiers, candidate)
     candidate_id = int(candidate.get("id") or 0)
     cached = store.get_nexus_candidate_check(candidate_id) if candidate_id else None
     if (
@@ -101,8 +141,15 @@ def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dic
         and float(cached.get("checked") or 0) + config.NEXUS_PRECHECK_CACHE_SECONDS > time.time()
     ):
         return dict(cached.get("result") or {})
-    if identity_key == "none":
-        result = {"state": "identifier_required", "blocked": False, "checked": False}
+    if not any(identifiers.values()):
+        # Current Nexus search accepts email, phone, or NPI only. Do not let a
+        # contactless profile proceed to enrichment when the ownership guard
+        # cannot perform a pre-enrichment lookup by the candidate's name and
+        # city/state.
+        result = {
+            "state": "identity_search_unavailable", "blocked": True,
+            "checked": False,
+        }
         if candidate_id:
             store.save_nexus_candidate_check(candidate_id, identity_key, result)
         return result
@@ -154,6 +201,7 @@ def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dic
         if not _truthy(row.get("active"))
     }
     blocked_records = []
+    unverified_records = []
     for key, row in matches.items():
         status_id = str(row.get("statusId") or "")
         status_code = str(row.get("statusCode") or "").strip().casefold()
@@ -163,7 +211,12 @@ def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dic
             status_code and status_code in inactive_codes
         )
         if is_active or (owned and not explicitly_inactive):
-            blocked_records.append(_record_summary(row, sorted(set(matched_by.get(key) or []))))
+            summary = _record_summary(row, sorted(set(matched_by.get(key) or [])))
+            identity_match = _identity_match(candidate, row)
+            if identity_match is True:
+                blocked_records.append(summary)
+            elif identity_match is None:
+                unverified_records.append(summary)
     if blocked_records:
         primary = blocked_records[0]
         result = {
@@ -171,6 +224,11 @@ def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dic
             "status": primary["status"], "status_code": primary["status_code"],
             "recruiter": primary["recruiter"], "matched_by": primary["matched_by"],
             "match_count": len(blocked_records),
+        }
+    elif unverified_records:
+        result = {
+            "state": "identity_unverified", "blocked": True, "checked": True,
+            "match_count": len(unverified_records),
         }
     else:
         result = {"state": "clear", "blocked": False, "checked": True}
@@ -182,7 +240,7 @@ def check_candidate(candidate: Mapping[str, Any], *, fresh: bool = False) -> dic
 def stored_result(candidate: Mapping[str, Any]) -> dict[str, Any]:
     candidate_id = int(candidate.get("id") or 0)
     row = store.get_nexus_candidate_check(candidate_id) if candidate_id else None
-    if not row or row.get("identity_key") != _identity_key(candidate_identifiers(candidate)):
+    if not row or row.get("identity_key") != _identity_key(candidate_identifiers(candidate), candidate):
         return {}
     return dict(row.get("result") or {})
 

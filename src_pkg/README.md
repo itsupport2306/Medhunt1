@@ -439,11 +439,10 @@ Quick Sourcer answers the panel's candidate lookups. **Find contact details**
 on a selection, and **Enrich** on a single candidate, both call the Quick
 Sourcer external API on the Hub and store exactly what it returns — every
 phone number it reports regardless of line type, every email address, and the
-addresses on record. There is no identity threshold, no provider likelihood
-floor, and no trust gate in front of that data: the recruiter sees the
-external record itself. The one filter that still applies is the
-do-not-contact list, which is a compliance obligation rather than a confidence
-judgement.
+addresses on record, but only after the first/last name and current
+city/state match the candidate exactly. Historical addresses do not satisfy
+the location check. Do-not-contact filtering applies before contacts are
+returned.
 
 `CONTACT_LOOKUP_PROVIDER` selects this. Set it to `people_data_labs` to
 restore the PDL → Enformion waterfall and its verification policy, which
@@ -612,12 +611,17 @@ the allowlisted settings from `NEXUS_REFERENCE_ENV` and
 
 When `NEXUS_PRECHECK_ENABLED=1`, Medhunt searches Nexus by exact email, exact
 phone, and NPI before exposing enriched contacts or sending Zoom Phone SMS.
-Candidates in an active Nexus status are shown as already active with their
-current recruiter and cannot be enriched or messaged. If Nexus cannot be
-verified, these actions fail closed and can be retried after the service is
-available. The setting defaults to the value of `NEXUS_SYNC_ENABLED`, so an
-existing Nexus-enabled Render service does not require another environment
-variable.
+The current search integration does not query by first name, last name, city,
+and state. A contact hit is called an active Nexus match only when Nexus also
+returns a matching first/last name and exact city/state. If Nexus omits those
+identity fields, Medhunt blocks the operation and labels the result as a
+possible match needing review, rather than claiming it is the same person. If
+the candidate has no email, phone, or NPI for the available Nexus search, the
+operation is also blocked until Nexus supports a name/city/state search. If
+Nexus cannot be verified, these actions fail closed and can be retried after
+the service is available. The setting defaults to the value of
+`NEXUS_SYNC_ENABLED`, so an existing Nexus-enabled Render service does not
+require another environment variable.
 
 For a hosted deployment, add the production Chrome extension origin after the
 Chrome Web Store assigns its ID:
@@ -641,6 +645,14 @@ catalog's related profession ID keeps the two fields consistent. If no safe
 mapping exists, Medhunt sends the tenant's explicit Unknown profession and
 Unknown specialty pair. Profiles without a declared specialty can still use
 the configured fallback, or the tenant's Unknown/Other/General master data.
+
+For identity, Nexus receives the candidate's first and last name, middle name
+when available, city, and the Nexus state ID resolved from the candidate's
+state. Candidate city/state are required; tenant defaults cannot substitute
+for the candidate's location. Profession and specialty are sent as Nexus
+master-data IDs resolved from the candidate's role/specialty. If the source
+does not provide a safe classification, Medhunt uses the tenant's explicit
+Unknown classification instead of inventing one.
 
 For contacts, Nexus receives the available primary email and/or primary phone.
 The email is the first trusted, non-DNC address in provider order. Phone selection

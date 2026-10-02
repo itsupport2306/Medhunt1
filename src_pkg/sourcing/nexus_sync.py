@@ -28,7 +28,7 @@ from urllib.parse import quote
 
 import httpx
 
-from . import nexus_taxonomy
+from . import nexus_taxonomy, verification
 from .person_name import identity_signature, is_name_suffix, normalize_person_name
 
 
@@ -816,6 +816,13 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
         city = parts[0]
     if not state and len(parts) >= 2:
         state = parts[-2] if len(parts) >= 3 else parts[-1]
+    parsed_location = verification.us_city_state(location)
+    if parsed_location:
+        parsed_city, parsed_state = (part.strip() for part in parsed_location.split(",", 1))
+        city = city or parsed_city
+        # Strip ZIP codes and normalize full state names before resolving the
+        # state against Nexus master data.
+        state = parsed_state
     if not country and len(parts) >= 3:
         country = parts[-1]
     return {
@@ -1104,8 +1111,13 @@ def _build_profile(
     )
     if identity.get("middleName"):
         profile["middleName"] = identity["middleName"]
-    if identity.get("city"):
-        profile["city"] = identity["city"]
+    city_text = str(identity.get("city") or "").strip()
+    if not city_text:
+        raise NexusPermanentError(
+            "Candidate city is required for Nexus creation.",
+            operation="payload_validation",
+        )
+    profile["city"] = city_text
 
     if not profile["firstName"] or not profile["lastName"]:
         raise NexusPermanentError(
@@ -1141,9 +1153,9 @@ def _build_profile(
                 (state_text,),
                 description="state",
             )
-    elif not _default_id(profile, "stateId"):
+    else:
         raise NexusPermanentError(
-            "Candidate state is required for Nexus creation.",
+            "Candidate state is required for Nexus creation; tenant defaults cannot replace candidate location.",
             operation="payload_validation",
         )
 
@@ -1201,7 +1213,7 @@ def _build_profile(
 
     profession_id = _default_id(profile, "professionId", "professionIds")
     profession_inferred = False
-    if not profile.get("jobId") and not profession_id:
+    if not profession_id:
         profession_id = _preferred_master_id(
             client,
             "professions",
@@ -1265,7 +1277,7 @@ def _build_profile(
                     ) from exc
                 profile["professionId"] = profession_id
                 profile["professionIds"] = [profession_id]
-    elif not profile.get("jobId") and not specialty_id:
+    elif not specialty_id:
         try:
             specialty_id = _preferred_master_id(
                 client,

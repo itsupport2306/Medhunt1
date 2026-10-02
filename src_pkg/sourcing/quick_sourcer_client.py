@@ -1,6 +1,6 @@
 """Quick Sourcer external contact lookup.
 
-Quick Sourcer answers a name (plus an optional location) with a person's
+Quick Sourcer answers a name and location with a person's
 contact details and the full public record behind them.  Behind its API a real
 browser visits the underlying people-search site, so one uncached search takes
 30-90 seconds; found records are cached locally so the panel can reopen them
@@ -9,10 +9,9 @@ instantly.
 The API key is read only by this backend.  The browser extension calls the
 local ``/quick-sourcer/*`` endpoints and never receives or stores the key.
 
-A Quick Sourcer record is returned to the panel as its own clearly attributed
-result.  It is deliberately never written into the candidate contact columns:
-those stay reserved for the PDL/Enformion pipeline, whose trust policy decides
-what may be reused for outreach.
+Quick Sourcer contacts are saved against the candidate only after exact
+first/last name and current city/state checks. Database reads recheck that
+identity evidence before returning the stored contacts.
 """
 from __future__ import annotations
 
@@ -21,7 +20,7 @@ import time
 
 import httpx
 
-from . import config, person_name, store
+from . import config, person_name, store, verification
 
 _PROVIDER = "quick_sourcer"
 _MASKED_EMAIL_RE = re.compile(r"\*")
@@ -337,7 +336,7 @@ def _failure(exc: Exception, *, dedicated_ip: bool = False) -> dict:
     return _empty("error", f"Quick Sourcer request failed ({type(exc).__name__}).")
 
 
-def _is_person(result: dict, searched_name: str = "") -> bool:
+def _is_person(result: dict, searched_name: str = "", searched_location: str = "") -> bool:
     """Reject a "found" record that is page furniture rather than a person.
 
     The upstream search answers with its single best guess and has no way to
@@ -352,10 +351,14 @@ def _is_person(result: dict, searched_name: str = "") -> bool:
         return False
     if not searched_name:
         return True
-    returned = set(person_name.identity_tokens(result.get("name") or ""))
-    if not returned:
+    if not verification.name_evidence(searched_name, result.get("name") or "").get("exact"):
         return False
-    return bool(returned & set(person_name.identity_tokens(searched_name)))
+    expected_location = verification.us_city_state(searched_location)
+    current_address = (result.get("current_address") or {}).get("address") or ""
+    return bool(
+        expected_location
+        and verification.location_evidence(expected_location, [current_address]).get("exact")
+    )
 
 
 def find(name: str, location: str = "", candidate_id: int = 0,
@@ -374,7 +377,7 @@ def find(name: str, location: str = "", candidate_id: int = 0,
     request_key = _request_key(person, location, use_dedicated)
     if not refresh:
         hit = _cached(request_key)
-        if hit:
+        if hit and _is_person(hit, person, location):
             return hit
     try:
         request_payload = {"name": person, "location": _text(location)}
@@ -384,7 +387,7 @@ def find(name: str, location: str = "", candidate_id: int = 0,
     except Exception as exc:
         return _failure(exc, dedicated_ip=use_dedicated)
     result = normalize(payload)
-    if not _is_person(result, person):
+    if not _is_person(result, person, location):
         return _empty("not_found")
     _remember(request_key, candidate_id, result)
     return result
@@ -400,16 +403,22 @@ def fetch(external_id: int, refresh: bool = False) -> dict:
         return _empty("disabled", "Quick Sourcer is not configured on this backend.")
 
     request_key = _external_key(identifier)
+    row = store.get_provider_lookup(_PROVIDER, request_key)
+    candidate = store.get_candidate(int(row.get("candidate_id") or 0)) if row else None
+    if not candidate:
+        return _empty("not_found")
+    expected_name = str(candidate.get("name") or candidate.get("canonical_name") or "")
+    expected_location = str(candidate.get("location") or "")
     if not refresh:
         hit = _cached(request_key)
-        if hit:
+        if hit and _is_person(hit, expected_name, expected_location):
             return hit
     try:
         payload = _call("GET", f"/candidates/{identifier}")
     except Exception as exc:
         return _failure(exc)
     result = normalize(payload)
-    if not _is_person(result):
+    if not _is_person(result, expected_name, expected_location):
         return _empty("not_found")
     _remember(request_key, 0, result)
     return result
@@ -489,7 +498,7 @@ def apply_to_candidate(candidate_id: int, result: dict) -> dict:
     expires = now + max(3600, config.QUICK_SOURCER_CACHE_TTL_SECONDS or 0)
     verification = {
         "source": CONTACT_SOURCE,
-        "identity_status": "public_record",
+        "identity_status": "exact_name_location" if found else "unverified",
         "checked_at": now,
         "record": _stored_record(result) if result.get("status") == "found" else {},
         "evidence": {

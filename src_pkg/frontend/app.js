@@ -532,7 +532,7 @@ function candidateCard(candidate) {
     ? `<span class="contact-origin">Public record</span>`
     : "";
   const nexusNotice = nexusBlocked
-    ? `<div class="notice error"><strong>Already active in Nexus</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
+    ? `<div class="notice error"><strong>${nexus.state === "identity_unverified" ? "Possible Nexus match — identity could not be verified" : nexus.state === "identity_search_unavailable" ? "Nexus check needs name and location search support" : "Already active in Nexus"}</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
     : "";
   const contact = successful
     ? `<div class="contact">
@@ -686,7 +686,14 @@ async function submitIntake() {
 
 async function enrichCandidate(id) {
   const result = await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
-  notify(result.status === "blocked" ? "Candidate is already active in Nexus." : "Candidate enriched.");
+  const nexusState = result.nexus_eligibility?.state;
+  notify(result.status === "blocked"
+    ? nexusState === "identity_search_unavailable"
+      ? "Cannot verify this candidate in Nexus until name and city/state search is supported."
+      : nexusState === "identity_unverified"
+        ? "Possible Nexus match needs identity review."
+        : "Candidate is already active in Nexus."
+    : "Candidate enriched.");
   await viewCandidates();
 }
 
@@ -1962,7 +1969,7 @@ function indeedResultStatus(profile) {
     const nexus = result.nexus_eligibility || {};
     const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
     return `<div class="lookup-outcome">
-      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>Already active in Nexus</span>
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>${nexus.state === "identity_unverified" ? "Possible Nexus match · identity needs review" : nexus.state === "identity_search_unavailable" ? "Nexus check needs name and location search support" : "Already active in Nexus"}</span>
       ${details ? `<span class="lookup-detail">${escapeHtml(details)}</span>` : ""}
     </div>`;
   }
