@@ -88,6 +88,26 @@ def report_enrichment(token: str, *, event_id: str, candidate_id: int,
     return bool(response.json().get("recorded", True))
 
 
+def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
+                              status: str, source: str = "", run_id: str = "") -> bool:
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not enabled() or not token or not user_id:
+        return False
+    response = httpx.post(
+        _url("/api/extension/activity/enrichment/service"),
+        headers={"X-Medhunt-Service-Token": token},
+        json={
+            "user_id": str(user_id), "event_id": str(event_id),
+            "candidate_id": str(candidate_id), "status": str(status),
+            "source": str(source), "provider": "quick_sourcer",
+            "run_id": str(run_id),
+        },
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return bool(response.json().get("recorded", True))
+
+
 def list_recruiters(token: str) -> list[dict]:
     response = httpx.get(
         _url("/api/extension/team/recruiters"),

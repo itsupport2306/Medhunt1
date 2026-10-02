@@ -35,6 +35,7 @@ from sourcing import (
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
     profile_resume, zoom_sms, nexus_eligibility,
+    contact_lookup_queue,
 )
 
 
@@ -50,13 +51,15 @@ async def lifespan(_app: FastAPI):
             config.NEXUS_DISABLED_REASON,
         )
     nexus_delivery.start()
+    contact_lookup_queue.start()
     try:
         yield
     finally:
+        contact_lookup_queue.stop()
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.28.0"
+APP_VERSION = "3.29.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -511,6 +514,7 @@ def health():
 @app.post("/internal/halo/api-monitor")
 def halo_api_monitor():
     status = quick_sourcer_client.status()
+    queue = store.contact_lookup_queue_counts()
     return {
         "service": "medhunt1",
         "lookup_provider": {
@@ -518,6 +522,8 @@ def halo_api_monitor():
             "configured": bool(status.get("configured")),
             "search_pool": str(status.get("search_pool") or ""),
             **dict(status.get("requests") or {}),
+            "queued": queue["queued"],
+            "processing": queue["processing"],
         },
     }
 
@@ -526,6 +532,33 @@ def halo_api_monitor():
 def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
     _request_user(request)
     return store.nexus_delivery_summary(body.candidate_ids)
+
+
+@app.post("/contact-lookup/queue")
+def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
+    actor = _request_user(request)
+    if not body.confirmed:
+        raise HTTPException(400, "Confirm the selected candidates before queueing lookup.")
+    items = store.enqueue_contact_lookup_jobs(
+        body.run_id, body.candidate_ids, str(actor.get("sub") or "local"),
+    )
+    return {"status": "queued", "run_id": body.run_id, "items": [
+        {key: item.get(key) for key in ("candidate_id", "status", "attempts", "position", "result")}
+        for item in items
+    ]}
+
+
+@app.post("/contact-lookup/queue/status")
+def contact_lookup_queue_status(body: ContactLookupBatchIn, request: Request):
+    actor = _request_user(request)
+    data = store.list_contact_lookup_jobs(
+        body.run_id, body.candidate_ids,
+        requested_by=str(actor.get("sub") or "local"),
+    )
+    return {**data, "items": [
+        {key: item.get(key) for key in ("candidate_id", "status", "attempts", "position", "result")}
+        for item in data["items"]
+    ]}
 
 
 @app.get("/auth/config")

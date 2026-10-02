@@ -120,6 +120,13 @@ CREATE TABLE IF NOT EXISTS api_request_activity(
   request_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
   operation TEXT DEFAULT '', status TEXT DEFAULT 'active',
   started REAL NOT NULL, finished REAL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS contact_lookup_queue(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT UNIQUE NOT NULL,
+  run_id TEXT NOT NULL, candidate_id INTEGER NOT NULL,
+  requested_by TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+  attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
+  lease_until REAL DEFAULT 0, result TEXT DEFAULT '{}',
+  last_error TEXT DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS nexus_candidate_links(
   identity_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
   nexus_candidate_id TEXT NOT NULL UNIQUE, created REAL, updated REAL);
@@ -154,6 +161,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_lookups_run ON provider_lookups(provider
 CREATE INDEX IF NOT EXISTS idx_lookup_run_items_run ON lookup_run_items(run_id, phase);
 CREATE INDEX IF NOT EXISTS idx_api_request_activity_provider
   ON api_request_activity(provider, status, started);
+CREATE INDEX IF NOT EXISTS idx_contact_lookup_queue_ready
+  ON contact_lookup_queue(status, next_attempt_at, created);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_lookup_one_processing
+  ON contact_lookup_queue(status) WHERE status='processing';
 CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready
   ON nexus_deliveries(status, next_attempt_at, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity
@@ -321,6 +332,16 @@ _POSTGRES_SCHEMA = (
          started DOUBLE PRECISION NOT NULL,
          finished DOUBLE PRECISION DEFAULT 0
        )""",
+    """CREATE TABLE IF NOT EXISTS contact_lookup_queue(
+         id BIGSERIAL PRIMARY KEY, job_key TEXT UNIQUE NOT NULL,
+         run_id TEXT NOT NULL, candidate_id BIGINT NOT NULL,
+         requested_by TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+         attempts INTEGER DEFAULT 0,
+         next_attempt_at DOUBLE PRECISION DEFAULT 0,
+         lease_until DOUBLE PRECISION DEFAULT 0, result TEXT DEFAULT '{}',
+         last_error TEXT DEFAULT '', created DOUBLE PRECISION NOT NULL,
+         updated DOUBLE PRECISION NOT NULL
+       )""",
     """CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
          candidate_id BIGINT PRIMARY KEY, identity_key TEXT NOT NULL,
          blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}',
@@ -383,6 +404,10 @@ _POSTGRES_SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_lookup_run_items_run ON lookup_run_items(run_id, phase)",
     "CREATE INDEX IF NOT EXISTS idx_api_request_activity_provider "
     "ON api_request_activity(provider, status, started)",
+    "CREATE INDEX IF NOT EXISTS idx_contact_lookup_queue_ready "
+    "ON contact_lookup_queue(status, next_attempt_at, created)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_lookup_one_processing "
+    "ON contact_lookup_queue(status) WHERE status='processing'",
     "CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready "
     "ON nexus_deliveries(status, next_attempt_at, lease_until)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity "
@@ -420,6 +445,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "users", "enrichment_events", "jobs", "candidates", "outreach", "talent_pools", "talent_pool_members",
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
     "provider_lookups", "lookup_runs", "lookup_run_items", "api_request_activity",
+    "contact_lookup_queue",
     "nexus_candidate_links", "nexus_candidate_checks", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
@@ -454,7 +480,9 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_candidates_master", "idx_pool_members_candidate",
     "idx_campaign_members_candidate", "idx_resumes_candidate",
     "idx_resume_extractions_candidate", "idx_provider_lookups_run",
-    "idx_lookup_run_items_run", "idx_api_request_activity_provider", "idx_nexus_deliveries_ready",
+    "idx_lookup_run_items_run", "idx_api_request_activity_provider",
+    "idx_contact_lookup_queue_ready", "idx_contact_lookup_one_processing",
+    "idx_nexus_deliveries_ready",
     "idx_nexus_one_processing_identity", "idx_nexus_one_active_identity",
     "idx_watcher_email_delivery_status",
     "idx_sms_conversations_candidate", "idx_sms_conversations_session",
@@ -2524,6 +2552,156 @@ def api_request_monitor(provider: str, stale_seconds: float = 240.0) -> dict:
         "oldest_active_seconds": round(max(0.0, now - oldest), 1) if oldest else 0,
         "measured_at": now,
     }
+
+
+def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "") -> list[dict]:
+    now = time.time()
+    normalized_run = str(run_id or "").strip()
+    ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
+    owner = str(requested_by or "")[:200]
+    with _conn() as connection:
+        for candidate_id in ordered_ids:
+            job_key = f"{owner}:{normalized_run}:{candidate_id}"
+            connection.execute(
+                """INSERT INTO contact_lookup_queue(
+                     job_key,run_id,candidate_id,requested_by,status,attempts,
+                     next_attempt_at,lease_until,result,last_error,created,updated
+                   ) VALUES(?,?,?,?,'queued',0,0,0,'{}','',?,?)
+                   ON CONFLICT(job_key) DO NOTHING""",
+                (job_key, normalized_run, candidate_id, owner, now, now),
+            )
+    return list_contact_lookup_jobs(
+        normalized_run, ordered_ids, requested_by=str(requested_by or ""),
+    )["items"]
+
+
+def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str = "") -> dict:
+    normalized_run = str(run_id or "").strip()
+    ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
+    where = "WHERE run_id=?"
+    args = [normalized_run]
+    if requested_by:
+        where += " AND requested_by=?"
+        args.append(str(requested_by))
+    if ids:
+        where += " AND candidate_id IN (" + ",".join("?" for _ in ids) + ")"
+        args.extend(ids)
+    with _conn() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM contact_lookup_queue {where} ORDER BY created,id", args,
+        ).fetchall()
+        active_rows = connection.execute(
+            """SELECT id FROM contact_lookup_queue
+               WHERE status IN ('queued','retry','processing')
+               ORDER BY CASE WHEN status='processing' THEN 0 ELSE 1 END,
+                        next_attempt_at,created,id"""
+        ).fetchall()
+    positions = {int(row["id"]): index for index, row in enumerate(active_rows)}
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["result"] = json.loads(item.get("result") or "{}")
+        except (TypeError, ValueError):
+            item["result"] = {}
+        item["position"] = positions.get(int(item["id"]), 0)
+        items.append(item)
+    return {
+        "run_id": normalized_run,
+        "items": items,
+        "queued": sum(item["status"] in {"queued", "retry"} for item in items),
+        "processing": sum(item["status"] == "processing" for item in items),
+        "complete": sum(item["status"] in {"succeeded", "not_found", "blocked", "failed"} for item in items),
+    }
+
+
+def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
+    now = time.time()
+    lease_until = now + max(30.0, float(lease_seconds))
+    with _conn() as connection:
+        with connection.transaction():
+            connection.execute(
+                """UPDATE contact_lookup_queue
+                   SET status='retry',lease_until=0,next_attempt_at=?,updated=?,
+                       last_error='worker_restarted'
+                   WHERE status='processing' AND lease_until<=?""",
+                (now, now, now),
+            )
+            if connection.postgres:
+                row = connection.execute(
+                    """WITH picked AS (
+                         SELECT id FROM contact_lookup_queue
+                         WHERE status IN ('queued','retry') AND next_attempt_at<=?
+                           AND NOT EXISTS (
+                             SELECT 1 FROM contact_lookup_queue active
+                             WHERE active.status='processing' AND active.lease_until>?
+                           )
+                         ORDER BY next_attempt_at,created,id
+                         FOR UPDATE SKIP LOCKED LIMIT 1
+                       )
+                       UPDATE contact_lookup_queue q
+                       SET status='processing',attempts=q.attempts+1,
+                           lease_until=?,updated=? FROM picked
+                       WHERE q.id=picked.id RETURNING q.*""",
+                    (now, now, lease_until, now),
+                ).fetchone()
+                return dict(row) if row else None
+            active = connection.execute(
+                """SELECT 1 FROM contact_lookup_queue
+                   WHERE status='processing' AND lease_until>? LIMIT 1""", (now,),
+            ).fetchone()
+            if active:
+                return None
+            row = connection.execute(
+                """SELECT * FROM contact_lookup_queue
+                   WHERE status IN ('queued','retry') AND next_attempt_at<=?
+                   ORDER BY next_attempt_at,created,id LIMIT 1""", (now,),
+            ).fetchone()
+            if not row:
+                return None
+            updated = connection.execute(
+                """UPDATE contact_lookup_queue
+                   SET status='processing',attempts=attempts+1,lease_until=?,updated=?
+                   WHERE id=? AND status IN ('queued','retry')""",
+                (lease_until, now, int(row["id"])),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = connection.execute(
+                "SELECT * FROM contact_lookup_queue WHERE id=?", (int(row["id"]),),
+            ).fetchone()
+            return dict(claimed) if claimed else None
+
+
+def finish_contact_lookup_job(job_id: int, status: str, result=None, *, error: str = "", retry_at: float = 0) -> None:
+    allowed = {"succeeded", "not_found", "blocked", "failed", "retry"}
+    normalized = str(status or "").strip().casefold()
+    if normalized not in allowed:
+        raise ValueError("invalid contact lookup queue status")
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE contact_lookup_queue
+               SET status=?,result=?,last_error=?,next_attempt_at=?,
+                   lease_until=0,updated=? WHERE id=? AND status='processing'""",
+            (
+                normalized, json.dumps(result or {}, separators=(",", ":")),
+                str(error or "")[:1000], max(0.0, float(retry_at or 0)),
+                time.time(), int(job_id),
+            ),
+        )
+
+
+def contact_lookup_queue_counts() -> dict:
+    now = time.time()
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT
+                 SUM(CASE WHEN status IN ('queued','retry') THEN 1 ELSE 0 END) AS queued,
+                 SUM(CASE WHEN status='processing' AND lease_until>? THEN 1 ELSE 0 END) AS processing
+               FROM contact_lookup_queue""", (now,),
+        ).fetchone()
+    return {"queued": int((row and row["queued"]) or 0),
+            "processing": int((row and row["processing"]) or 0)}
 
 
 # ---- resumes ----

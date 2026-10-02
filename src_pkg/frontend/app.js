@@ -1903,7 +1903,11 @@ function indeedResultStatus(profile) {
     : result.resume_status === "failed" || result.resume_error
       ? `<span class="lookup-detail">Resume unavailable</span>`
       : "";
-  if (result.status === "looking_up") {
+  if (result.status === "queued") {
+    const ahead = Math.max(0, Number(result.queue_position) || 0);
+    return `<span class="lookup-searching"><i aria-hidden="true"></i>In queue${ahead ? ` Â· ${ahead} ahead` : ""}</span>`;
+  }
+  if (result.status === "looking_up" || result.status === "processing") {
     return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact</span>`;
   }
   if (result.status === "blocked") {
@@ -1946,7 +1950,7 @@ function indeedResultStatus(profile) {
   }
   if (result.status === "failed") {
     return `<div class="lookup-outcome">
-      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>Needs retry</span>
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>Lookup unavailable</span>
       ${resume}${resumeStatus}
     </div>`;
   }
@@ -2210,7 +2214,7 @@ function renderIndeedProfiles(scan = {}) {
             <span class="summary-signal" aria-hidden="true"></span><span>No contact</span><strong>${noMatch}</strong>
           </button>
           ${failed ? `<button type="button" role="tab" aria-selected="${indeedResultFilter === "failed"}" tabindex="${indeedResultFilter === "failed" ? "0" : "-1"}" class="summary-tile failed${indeedResultFilter === "failed" ? " active" : ""}" data-action="filter-indeed-results" data-filter="failed">
-            <span class="summary-signal" aria-hidden="true"></span><span>Retry</span><strong>${failed}</strong>
+            <span class="summary-signal" aria-hidden="true"></span><span>Unavailable</span><strong>${failed}</strong>
           </button>` : ""}
         </div>
         ${nexusDeliverySummaryMarkup()}` : `
@@ -2260,8 +2264,8 @@ function renderIndeedProfiles(scan = {}) {
       ${!hasResults ? `<div id="indeedSaveStatus" class="sync-status small ${escapeHtml(indeedSaveStatus?.state || "muted")}">${escapeHtml(indeedSaveStatus?.message || "")}</div>` : ""}
 
       ${hasResults ? (failed ? `<div class="results-actions">
-          <span>${failed} profile${failed === 1 ? " needs" : "s need"} another attempt.</span>
-          <button type="button" class="status-action secondary" data-action="retry-failed-lookups" aria-disabled="${indeedResumeBatchState.active ? "true" : "false"}"${indeedResumeBatchState.active ? " disabled" : ""}>Retry failed</button>
+          <span>${failed} profile lookup${failed === 1 ? " was" : "s were"} unavailable after automatic retries.</span>
+          <button type="button" class="status-action secondary" data-action="retry-failed-lookups" aria-disabled="${indeedResumeBatchState.active ? "true" : "false"}"${indeedResumeBatchState.active ? " disabled" : ""}>Try unavailable again</button>
         </div>` : "") : `
         <div class="workflow-footer command-dock" data-testid="action-dock">
           <div class="selection-summary" aria-live="polite">
@@ -3288,38 +3292,85 @@ async function lookupSelectedIndeedCandidates() {
   }
 
   const publicRecordLookup = sequentialLookupMode();
-  const chunkSize = publicRecordLookup ? RECORD_LOOKUP_BATCH_SIZE : CONTACT_BATCH_SIZE;
-  const chunkTimeout = publicRecordLookup
-    ? RECORD_LOOKUP_TIMEOUT
-    : CONTACT_BATCH_TIMEOUT;
-  for (let start = 0; start < lookupTargets.length; start += chunkSize) {
-    const chunk = lookupTargets.slice(start, start + chunkSize);
-    let payload;
-    try {
-      payload = await api("/contact-lookup/batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidate_ids: chunk.map((profile) => profile._candidateId),
-          run_id: lookupRunId,
-          confirmed: true,
-        }),
-        timeout: chunkTimeout,
+  if (publicRecordLookup && lookupTargets.length) {
+    const candidateIds = lookupTargets.map((profile) => Number(profile._candidateId));
+    await api("/contact-lookup/queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_ids: candidateIds, run_id: lookupRunId, confirmed: true }),
+      timeout: 30000,
+    });
+    const profilesById = new Map(
+      lookupTargets.map((profile) => [Number(profile._candidateId), profile]),
+    );
+    const completedIds = new Set();
+    for (const profile of lookupTargets) {
+      const previous = indeedLookupFor(profile);
+      indeedLookupState.set(profile._selectionKey, {
+        ...previous, status: "queued", queue_position: 0,
       });
-    } catch (error) {
+    }
+    renderIndeedProfiles();
+    let pollFailures = 0;
+    while (completedIds.size < candidateIds.length) {
+      try {
+        const queue = await api("/contact-lookup/queue/status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ candidate_ids: candidateIds, run_id: lookupRunId, confirmed: true }),
+          timeout: 30000,
+        });
+        pollFailures = 0;
+        for (const job of queue?.items || []) {
+          const candidateId = Number(job.candidate_id);
+          const profile = profilesById.get(candidateId);
+          if (!profile || completedIds.has(candidateId)) continue;
+          if (["succeeded", "not_found", "blocked", "failed"].includes(job.status)) {
+            completedIds.add(candidateId);
+            applyLookupResult(profile, job.result || { status: "failed" });
+          } else {
+            const previous = indeedLookupFor(profile);
+            indeedLookupState.set(profile._selectionKey, {
+              ...previous,
+              status: job.status === "processing" ? "processing" : "queued",
+              queue_position: Number(job.position) || 0,
+            });
+            updateIndeedLookupProgressUi(profile);
+          }
+        }
+      } catch {
+        pollFailures += 1;
+      }
+      if (completedIds.size < candidateIds.length) {
+        await new Promise((resolve) => setTimeout(
+          resolve, Math.min(10000, 2000 + pollFailures * 1000),
+        ));
+      }
+    }
+  } else {
+    for (let start = 0; start < lookupTargets.length; start += CONTACT_BATCH_SIZE) {
+      const chunk = lookupTargets.slice(start, start + CONTACT_BATCH_SIZE);
+      let payload;
+      try {
+        payload = await api("/contact-lookup/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            candidate_ids: chunk.map((profile) => profile._candidateId),
+            run_id: lookupRunId,
+            confirmed: true,
+          }),
+          timeout: CONTACT_BATCH_TIMEOUT,
+        });
+      } catch {
+        payload = { results: {} };
+      }
+      const byCandidate = payload?.results || {};
       for (const profile of chunk) {
-        applyLookupResult(profile, {
+        applyLookupResult(profile, byCandidate[String(profile._candidateId)] || {
           status: "failed",
         });
       }
-      continue;
-    }
-
-    const byCandidate = payload?.results || {};
-    for (const profile of chunk) {
-      applyLookupResult(profile, byCandidate[String(profile._candidateId)] || {
-        status: "failed",
-      });
     }
   }
 
