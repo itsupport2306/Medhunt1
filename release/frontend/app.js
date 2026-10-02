@@ -10,7 +10,7 @@ const AUTH_STORAGE_KEY = "medhuntHealthBoardSession";
 const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
-const MAX_LOOKUP_SELECTION = 60;
+const MAX_LOOKUP_SELECTION = 10;
 
 
 

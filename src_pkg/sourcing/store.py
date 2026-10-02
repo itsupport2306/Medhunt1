@@ -163,8 +163,8 @@ CREATE INDEX IF NOT EXISTS idx_api_request_activity_provider
   ON api_request_activity(provider, status, started);
 CREATE INDEX IF NOT EXISTS idx_contact_lookup_queue_ready
   ON contact_lookup_queue(status, next_attempt_at, created);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_lookup_one_processing
-  ON contact_lookup_queue(status) WHERE status='processing';
+CREATE INDEX IF NOT EXISTS idx_contact_lookup_processing_lease
+  ON contact_lookup_queue(status, lease_until, updated);
 CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready
   ON nexus_deliveries(status, next_attempt_at, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity
@@ -406,8 +406,9 @@ _POSTGRES_SCHEMA = (
     "ON api_request_activity(provider, status, started)",
     "CREATE INDEX IF NOT EXISTS idx_contact_lookup_queue_ready "
     "ON contact_lookup_queue(status, next_attempt_at, created)",
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_contact_lookup_one_processing "
-    "ON contact_lookup_queue(status) WHERE status='processing'",
+    "DROP INDEX IF EXISTS idx_contact_lookup_one_processing",
+    "CREATE INDEX IF NOT EXISTS idx_contact_lookup_processing_lease "
+    "ON contact_lookup_queue(status, lease_until, updated)",
     "CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready "
     "ON nexus_deliveries(status, next_attempt_at, lease_until)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity "
@@ -427,6 +428,7 @@ _POSTGRES_SCHEMA = (
 _POSTGRES_SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
 _CONTACT_LOOKUP_ENQUEUE_LOCK = threading.Lock()
+_CONTACT_LOOKUP_CLAIM_LOCK = threading.Lock()
 _POSTGRES_CONNECTION = None
 _POSTGRES_CONNECTION_LOCK = threading.RLock()
 _CANDIDATE_FIELDS = {
@@ -482,7 +484,7 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_campaign_members_candidate", "idx_resumes_candidate",
     "idx_resume_extractions_candidate", "idx_provider_lookups_run",
     "idx_lookup_run_items_run", "idx_api_request_activity_provider",
-    "idx_contact_lookup_queue_ready", "idx_contact_lookup_one_processing",
+    "idx_contact_lookup_queue_ready", "idx_contact_lookup_processing_lease",
     "idx_nexus_deliveries_ready",
     "idx_nexus_one_processing_identity", "idx_nexus_one_active_identity",
     "idx_watcher_email_delivery_status",
@@ -636,6 +638,7 @@ def _conn():
     try:
         raw.row_factory = sqlite3.Row
         raw.executescript(_SQLITE_SCHEMA)
+        raw.execute("DROP INDEX IF EXISTS idx_contact_lookup_one_processing")
         columns = {row["name"] for row in raw.execute("PRAGMA table_info(candidates)")}
         for name, definition in (
             ("hometown", "TEXT DEFAULT ''"),
@@ -2660,8 +2663,14 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
 def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
     now = time.time()
     lease_until = now + max(30.0, float(lease_seconds))
-    with _conn() as connection:
-        with connection.transaction():
+    concurrency_limit = int(config.CONTACT_LOOKUP_MAX_CONCURRENT)
+    with _CONTACT_LOOKUP_CLAIM_LOCK:
+        with _conn() as connection, connection.transaction():
+            if connection.postgres:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    ("contact-lookup-global-claim",),
+                )
             connection.execute(
                 """UPDATE contact_lookup_queue
                    SET status='retry',lease_until=0,next_attempt_at=?,updated=?,
@@ -2669,15 +2678,17 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                    WHERE status='processing' AND lease_until<=?""",
                 (now, now, now),
             )
+            active_count = _scalar(connection.execute(
+                """SELECT COUNT(*) FROM contact_lookup_queue
+                   WHERE status='processing' AND lease_until>?""", (now,),
+            )) or 0
+            if int(active_count) >= concurrency_limit:
+                return None
             if connection.postgres:
                 row = connection.execute(
                     """WITH picked AS (
                          SELECT id FROM contact_lookup_queue
                          WHERE status IN ('queued','retry') AND next_attempt_at<=?
-                           AND NOT EXISTS (
-                             SELECT 1 FROM contact_lookup_queue active
-                             WHERE active.status='processing' AND active.lease_until>?
-                           )
                          ORDER BY next_attempt_at,created,id
                          FOR UPDATE SKIP LOCKED LIMIT 1
                        )
@@ -2685,15 +2696,9 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                        SET status='processing',attempts=q.attempts+1,
                            lease_until=?,updated=? FROM picked
                        WHERE q.id=picked.id RETURNING q.*""",
-                    (now, now, lease_until, now),
+                    (now, lease_until, now),
                 ).fetchone()
                 return dict(row) if row else None
-            active = connection.execute(
-                """SELECT 1 FROM contact_lookup_queue
-                   WHERE status='processing' AND lease_until>? LIMIT 1""", (now,),
-            ).fetchone()
-            if active:
-                return None
             row = connection.execute(
                 """SELECT * FROM contact_lookup_queue
                    WHERE status IN ('queued','retry') AND next_attempt_at<=?

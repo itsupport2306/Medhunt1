@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.31.0"
+APP_VERSION = "3.32.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -528,6 +528,7 @@ def halo_api_monitor():
             **dict(status.get("requests") or {}),
             "queued": queue["queued"],
             "processing": queue["processing"],
+            "concurrency_limit": config.CONTACT_LOOKUP_MAX_CONCURRENT,
             "current_request_id": current_request_id,
         },
     }

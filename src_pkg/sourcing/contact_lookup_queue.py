@@ -12,7 +12,7 @@ from . import (
 
 
 _STOP = threading.Event()
-_THREAD: threading.Thread | None = None
+_THREADS: list[threading.Thread] = []
 _THREAD_LOCK = threading.Lock()
 _MAX_ATTEMPTS = 3
 
@@ -122,23 +122,34 @@ def _run() -> None:
         except Exception:
             logging.getLogger("medhunt.lookup").exception("Contact lookup queue worker failed")
             processed = None
-        _STOP.wait(0.5 if processed else 2.0)
+        if not processed:
+            _STOP.wait(1.0)
 
 
 def start() -> None:
-    global _THREAD
+    global _THREADS
     with _THREAD_LOCK:
-        if _THREAD and _THREAD.is_alive():
+        if any(thread.is_alive() for thread in _THREADS):
             return
         _STOP.clear()
-        _THREAD = threading.Thread(target=_run, name="contact-lookup-queue", daemon=True)
-        _THREAD.start()
+        _THREADS = [
+            threading.Thread(
+                target=_run,
+                name=f"contact-lookup-queue-{worker_number:02d}",
+                daemon=True,
+            )
+            for worker_number in range(1, config.CONTACT_LOOKUP_MAX_CONCURRENT + 1)
+        ]
+        for thread in _THREADS:
+            thread.start()
 
 
 def stop() -> None:
-    global _THREAD
+    global _THREADS
     _STOP.set()
-    thread = _THREAD
-    if thread and thread.is_alive():
-        thread.join(timeout=3)
-    _THREAD = None
+    deadline = time.monotonic() + 3.0
+    for thread in _THREADS:
+        remaining = deadline - time.monotonic()
+        if thread.is_alive() and remaining > 0:
+            thread.join(timeout=remaining)
+    _THREADS = []
