@@ -153,6 +153,8 @@ let activeJobId = null;
 let activeView = IS_EXTENSION ? "indeed" : "candidates";
 let activeDraft = null;
 let activeSmsContext = null;
+let selectedSmsCandidates = new Set();
+let visibleCandidates = [];
 let activeIndeedProfile = null;
 let publicRecordReturnProfile = null;
 let activePublicRecordResult = null;
@@ -170,6 +172,10 @@ const professionalProfileResumePromises = new Map();
 let indeedScanState = { phase: "idle", found: 0, total: 0 };
 let indeedLookupState = new Map();
 let indeedLookupSummary = null;
+let nexusDeliverySummary = null;
+let nexusDeliveryCandidateIds = [];
+let nexusDeliveryPollTimer = null;
+let nexusDeliveryGeneration = 0;
 let indeedResultFilter = "all";
 let indeedLookupScope = new Set();
 let indeedLookupProfiles = [];
@@ -472,8 +478,11 @@ function publicPhoneLabel(kind) {
 }
 
 function candidateCard(candidate) {
+  const nexus = candidate.nexus_eligibility || {};
+  const nexusBlocked = nexus.blocked === true;
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
+  const mobileContact = publicPhoneContacts(candidate).find((item) => item.kind === "mobile") || null;
   const phone = phoneContact?.value || "";
   const phoneLabel = publicPhoneLabel(phoneContact?.kind);
   const address = Array.isArray(candidate.addresses) ? candidate.addresses[0] : "";
@@ -483,6 +492,9 @@ function candidateCard(candidate) {
   const stage = STAGES.includes(candidate.stage) ? candidate.stage : "new";
   const publicRecord = candidate.records_available
     ? `<span class="contact-origin">Public record</span>`
+    : "";
+  const nexusNotice = nexusBlocked
+    ? `<div class="notice error"><strong>Already active in Nexus</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
     : "";
   const contact = successful
     ? `<div class="contact">
@@ -504,12 +516,14 @@ function candidateCard(candidate) {
       <div class="fit"><div class="number">${Number(candidate.fit_score) || 0}</div><div class="label">FIT</div></div>
     </div>
     <div><span class="${stageClass(stage)}">${escapeHtml(stage)}</span></div>
+    ${nexusNotice}
     ${contact}
     <div class="candidate-actions">
-      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}">Enrich</button>
+      ${IS_EXTENSION && mobileContact?.value && !nexusBlocked ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
+      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}"${nexusBlocked ? " disabled" : ""}>Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
-      ${phoneContact?.kind === "mobile" ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(phone)}">Send SMS</button>` : ""}
+      ${mobileContact?.value && !nexusBlocked ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(mobileContact.value)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -532,6 +546,7 @@ async function viewCandidates() {
       api(`/candidates${suffix}`),
       api("/stats"),
     ]);
+    visibleCandidates = candidates;
     $("#content").innerHTML = `
       <div class="notice">Candidate contact access · human approval required · do-not-contact enforced.</div>
       <div class="kpis">
@@ -548,6 +563,7 @@ async function viewCandidates() {
             <select id="jobSelect" class="field-auto">${jobOptions(true)}</select>
           </div>
           <div class="row">
+            ${IS_EXTENSION ? `<button type="button" class="btn teal" data-action="bulk-sms"${selectedSmsCandidates.size ? "" : " disabled"}>Bulk SMS (${selectedSmsCandidates.size})</button>` : ""}
             ${IS_EXTENSION ? `<button type="button" class="btn capture-btn" data-action="capture-indeed">Capture sourcing profile</button>` : ""}
             <button type="button" class="btn teal" data-action="enrich-all">Enrich all</button>
             <button type="button" class="btn ghost" data-action="rank-all"${activeJobId ? "" : " disabled"}>Rank vs job</button>
@@ -631,8 +647,8 @@ async function submitIntake() {
 }
 
 async function enrichCandidate(id) {
-  await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
-  notify("Candidate enriched.");
+  const result = await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
+  notify(result.status === "blocked" ? "Candidate is already active in Nexus." : "Candidate enriched.");
   await viewCandidates();
 }
 
@@ -1547,6 +1563,7 @@ function startProfessionalProfileResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("Professional profile resumes could not be saved.", "error");
       }
+      refreshTrackedNexusDeliveries();
     }
   })();
 }
@@ -1888,6 +1905,14 @@ function indeedResultStatus(profile) {
   if (result.status === "looking_up") {
     return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact</span>`;
   }
+  if (result.status === "blocked") {
+    const nexus = result.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    return `<div class="lookup-outcome">
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>Already active in Nexus</span>
+      ${details ? `<span class="lookup-detail">${escapeHtml(details)}</span>` : ""}
+    </div>`;
+  }
   if (isIndeedMatch(result)) {
     const emails = result.emails || [];
     const phoneContacts = publicPhoneContacts(result);
@@ -1967,7 +1992,9 @@ function indeedFilteredProfiles() {
     return scopedProfiles.filter((profile) => isIndeedMatch(indeedLookupFor(profile)));
   }
   if (indeedResultFilter === "no_match") {
-    return scopedProfiles.filter((profile) => indeedLookupFor(profile)?.status === "not_found");
+    return scopedProfiles.filter((profile) => ["not_found", "blocked"].includes(
+      indeedLookupFor(profile)?.status,
+    ));
   }
   if (indeedResultFilter === "failed") {
     return scopedProfiles.filter((profile) => indeedLookupFor(profile)?.status === "failed");
@@ -2184,7 +2211,8 @@ function renderIndeedProfiles(scan = {}) {
           ${failed ? `<button type="button" role="tab" aria-selected="${indeedResultFilter === "failed"}" tabindex="${indeedResultFilter === "failed" ? "0" : "-1"}" class="summary-tile failed${indeedResultFilter === "failed" ? " active" : ""}" data-action="filter-indeed-results" data-filter="failed">
             <span class="summary-signal" aria-hidden="true"></span><span>Retry</span><strong>${failed}</strong>
           </button>` : ""}
-        </div>` : `
+        </div>
+        ${nexusDeliverySummaryMarkup()}` : `
         <div class="capture-toolbar">
           <div class="queue-heading">
             <span class="section-kicker">Profiles on this page</span>
@@ -2254,6 +2282,71 @@ function showIndeedSaveStatus(state, message) {
   if (!element) return;
   element.textContent = message;
   element.className = `sync-status small ${state}`;
+}
+
+function nexusDeliverySummaryMarkup() {
+  if (!nexusDeliverySummary) return "";
+  if (nexusDeliverySummary.loading) {
+    return `<div class="nexus-delivery-summary is-pending" role="status">Checking Nexus upload results...</div>`;
+  }
+  if (nexusDeliverySummary.enabled === false) {
+    return `<div class="nexus-delivery-summary" role="status"><strong>Nexus upload</strong><span>Disabled for this backend.</span></div>`;
+  }
+  const uploaded = Number(nexusDeliverySummary.uploaded) || 0;
+  const pending = Number(nexusDeliverySummary.pending) || 0;
+  const notUploaded = Number(nexusDeliverySummary.not_uploaded) || 0;
+  return `<div class="nexus-delivery-summary${pending ? " is-pending" : ""}" role="status" aria-live="polite">
+    <strong>Nexus upload</strong>
+    <span><b>${uploaded}</b> uploaded</span>
+    <span><b>${pending}</b> pending</span>
+    <span><b>${notUploaded}</b> not uploaded</span>
+  </div>`;
+}
+
+function stopNexusDeliveryPolling() {
+  clearTimeout(nexusDeliveryPollTimer);
+  nexusDeliveryPollTimer = null;
+}
+
+async function refreshNexusDeliverySummary(generation, attempt = 0) {
+  if (generation !== nexusDeliveryGeneration || !nexusDeliveryCandidateIds.length) return;
+  try {
+    const summary = await api("/nexus/delivery-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_ids: nexusDeliveryCandidateIds }),
+      timeout: 20000,
+    });
+    if (generation !== nexusDeliveryGeneration) return;
+    nexusDeliverySummary = summary;
+    if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
+    if (attempt < 20 && (Number(summary?.pending) > 0 || indeedResumeBatchState.active)) {
+      nexusDeliveryPollTimer = setTimeout(
+        () => refreshNexusDeliverySummary(generation, attempt + 1), 3000,
+      );
+    }
+  } catch {
+    if (generation !== nexusDeliveryGeneration) return;
+    nexusDeliverySummary = null;
+  }
+}
+
+function trackNexusDeliveries(candidateIds) {
+  const ids = [...new Set((candidateIds || []).map(Number).filter(Number.isInteger))];
+  stopNexusDeliveryPolling();
+  nexusDeliveryGeneration += 1;
+  nexusDeliveryCandidateIds = ids;
+  if (!ids.length) {
+    nexusDeliverySummary = null;
+    return;
+  }
+  nexusDeliverySummary = { loading: true, selected: ids.length };
+  if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
+  void refreshNexusDeliverySummary(nexusDeliveryGeneration);
+}
+
+function refreshTrackedNexusDeliveries() {
+  if (nexusDeliveryCandidateIds.length) trackNexusDeliveries(nexusDeliveryCandidateIds);
 }
 
 async function ensureProfessionalProfileResume(profile) {
@@ -2395,6 +2488,10 @@ async function performDisplayedIndeedSave(searchUrl) {
     source: boundedText(profile.source, 50),
     source_url: boundedText(profile.source_url, 2000),
     source_id: boundedText(profile.source_id, 500),
+    npi: boundedText(profile.profile_document?.npi || (
+      ["npino", "npiprofile"].includes(String(profile.source || "").toLowerCase())
+        ? profile.source_id : ""
+    ), 30),
   }));
   try {
     const result = await api("/candidates/import/batch", {
@@ -3062,6 +3159,9 @@ async function lookupSelectedIndeedCandidates() {
   clearTimeout(indeedAutoScanTimer);
   indeedAutoScanTimer = null;
   indeedLookupInProgress = true;
+  stopNexusDeliveryPolling();
+  nexusDeliverySummary = null;
+  nexusDeliveryCandidateIds = [];
 
 
   indeedScanGeneration += 1;
@@ -3139,7 +3239,7 @@ async function lookupSelectedIndeedCandidates() {
 
   function applyLookupResult(profile, lookup) {
     const previous = indeedLookupFor(profile);
-    const status = ["found", "not_found", "failed"].includes(lookup?.status)
+    const status = ["found", "not_found", "failed", "blocked"].includes(lookup?.status)
       ? lookup.status
       : "failed";
     const result = {
@@ -3158,6 +3258,7 @@ async function lookupSelectedIndeedCandidates() {
         lookup.location_match.value.trim()
         ? { type: "hometown", value: lookup.location_match.value.trim().slice(0, 160) }
         : null,
+      nexus_eligibility: lookup?.nexus_eligibility || {},
       resume: previous.resume || null,
       resume_status: previous.resume_status || "",
       resume_error: previous.resume_error || "",
@@ -3229,6 +3330,7 @@ async function lookupSelectedIndeedCandidates() {
     `${indeedLookupSummary.errors ? `; ${indeedLookupSummary.errors} could not be checked` : ""}`,
     indeedLookupSummary.errors ? "error" : "",
   );
+    trackNexusDeliveries(lookupTargets.map((profile) => profile._candidateId));
     if (professionalProfileResumeQueue.length) {
       await startProfessionalProfileResumeBatch(professionalProfileResumeQueue);
     } else if (resumeQueue.length) {
@@ -3527,6 +3629,7 @@ function startLinkedinResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("LinkedIn profile PDFs were unavailable.", "error");
       }
+      refreshTrackedNexusDeliveries();
 
       const pending = pendingSourcingContext;
       pendingSourcingContext = null;
@@ -3617,6 +3720,7 @@ function startIndeedResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("Resumes could not be saved.", "error");
       }
+      refreshTrackedNexusDeliveries();
 
       let currentTab = null;
       try {
@@ -3835,22 +3939,31 @@ async function copyDraft() {
 
 async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
+  const preview = await api("/candidates/" + Number(candidateId) + "/sms-preview?phone=" + encodeURIComponent(phone));
+  if (preview.nexus_blocked) {
+    const nexus = preview.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    throw new Error("This candidate is already active in Nexus" + (details ? " (" + details + ")." : "."));
+  }
+  if (preview.opted_out) throw new Error("This number has opted out and cannot be messaged.");
+  if (preview.already_contacted) throw new Error("This candidate has already received SMS outreach.");
   activeSmsContext = { candidateId, candidateName, phone };
   const status = await api("/messaging/status");
-  const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
-  const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
+  const canSend = Boolean(status.enabled && status.sender_configured);
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
       <span class="section-kicker">Zoom Phone</span>
       <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
       <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
+      ${status.enabled && !status.sender_configured ? `<div class="notice error">Ask your Halo administrator to assign your Zoom Phone number before sending.</div>` : ""}
+      ${!status.reply_notifications_configured ? `<div class="notice mt">Reply email notifications are not fully configured.</div>` : ""}
       <label class="field-label" for="smsMessage">Message</label>
-      <textarea id="smsMessage" rows="6" maxlength="420"${status.enabled ? "" : " disabled"}>${escapeHtml(defaultMessage)}</textarea>
+      <textarea id="smsMessage" rows="6" maxlength="420" placeholder="Write a custom message for this candidate"${canSend ? "" : " disabled"}></textarea>
       <p class="muted small">Medhunt automatically adds its identity and ?Reply STOP to opt out? to each message.</p>
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
-        <button type="button" class="btn teal" data-action="send-sms"${status.enabled ? "" : " disabled"}>Send with Zoom Phone</button>
+        <button type="button" class="btn teal" data-action="send-sms"${canSend ? "" : " disabled"}>Send with Zoom Phone</button>
       </div>
     </section>
   </div>`;
@@ -3881,6 +3994,95 @@ async function sendCandidateSms() {
   });
   closeModal();
   notify("Message accepted by Zoom Phone.");
+}
+
+async function showBulkSmsComposer() {
+  const selected = visibleCandidates.filter((candidate) => selectedSmsCandidates.has(Number(candidate.id)));
+  if (!selected.length) throw new Error("Select at least one candidate with a verified mobile number.");
+  const status = await api("/messaging/status");
+  if (!status.enabled) throw new Error("Zoom Phone SMS is not configured on the Medhunt server.");
+  if (!status.sender_configured) throw new Error("Ask your Halo administrator to assign your Zoom Phone number before sending.");
+  const entries = [];
+  for (const candidate of selected) {
+    const mobile = publicPhoneContacts(candidate).find((item) => item.kind === "mobile")?.value || "";
+    if (!mobile) continue;
+    let preview = { phone: mobile, opted_out: false, already_contacted: false };
+    try {
+      preview = await api("/candidates/" + Number(candidate.id) + "/sms-preview?phone=" + encodeURIComponent(mobile));
+    } catch (error) {
+      preview = { phone: mobile, opted_out: true, already_contacted: false, error: error.message };
+    }
+    const firstName = String(candidate.name || "there").trim().split(/\s+/u)[0] || "there";
+    entries.push({
+      candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
+      phone: preview.phone || mobile,
+      message: "Hello " + firstName + ", This is Brian from Medhunt. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
+      blocked: Boolean(preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
+      reason: preview.error || (preview.nexus_blocked ? "Already active in Nexus" : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
+    });
+  }
+  if (!entries.length) throw new Error("The selected candidates have no verified mobile numbers.");
+  activeSmsContext = { bulk: entries };
+  const cards = entries.map((entry, index) =>
+    '<div class="card bulk-sms-item"><div class="row spread"><strong>' + escapeHtml(entry.name) +
+    '</strong><span class="muted small">' + escapeHtml(entry.phone) + '</span></div>' +
+    (entry.blocked ? '<p class="notice error mt">' + escapeHtml(entry.reason || "Cannot send") + '</p>' : "") +
+    '<textarea data-bulk-sms-message="' + index + '" rows="4" maxlength="1600"' +
+    (entry.blocked ? " disabled" : "") + '>' + escapeHtml(entry.message) + '</textarea>' +
+    '<p class="muted small" data-bulk-sms-count="' + index + '"></p></div>'
+  ).join("");
+  $("#modalRoot").innerHTML = '<div class="modal" role="presentation"><section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="bulkSmsTitle">' +
+    '<span class="section-kicker">Zoom Phone</span><h3 id="bulkSmsTitle">Review bulk SMS (' + entries.length + ')</h3>' +
+    '<p class="muted small">Edit each message before sending. Messages over 29 words, opted-out candidates, and candidates already contacted are blocked.</p>' +
+    '<div class="bulk-sms-list">' + cards + '</div><div class="row modal-actions">' +
+    '<button type="button" class="btn ghost" data-action="close-modal">Cancel</button>' +
+    '<button type="button" class="btn teal" data-action="send-bulk-sms">Send available messages</button></div></section></div>';
+  $("#modalRoot").querySelectorAll("[data-bulk-sms-message]").forEach((field) => {
+    const update = () => {
+      const words = field.value.trim().split(/\s+/u).filter(Boolean).length;
+      const counter = $("[data-bulk-sms-count=\"" + field.dataset.bulkSmsMessage + "\"]");
+      if (counter) counter.textContent = words + " / 29 words" + (words > 29 ? " · over limit" : "");
+    };
+    field.addEventListener("input", update);
+    update();
+  });
+}
+
+async function sendBulkSms() {
+  const entries = activeSmsContext?.bulk || [];
+  if (!entries.length) throw new Error("Bulk message review expired.");
+  const ready = entries.map((entry, index) => ({
+    ...entry,
+    message: $("[data-bulk-sms-message=\"" + index + "\"]")?.value.trim() || "",
+  })).filter((entry) => !entry.blocked);
+  for (const entry of ready) {
+    const words = entry.message.split(/\s+/u).filter(Boolean).length;
+    if (!words) throw new Error("Write a message for " + entry.name + ".");
+    if (words > 29) throw new Error(entry.name + "'s message is over the 29-word limit.");
+  }
+  if (!ready.length) throw new Error("There are no eligible messages to send.");
+  const button = $("[data-action=\"send-bulk-sms\"]");
+  if (button) button.disabled = true;
+  let sent = 0;
+  let failed = 0;
+  for (const entry of ready) {
+    try {
+      await api("/messaging/sms", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ candidate_id: entry.candidateId, phone: entry.phone,
+          message: entry.message, request_id: crypto.randomUUID() }), timeout: 60000,
+      });
+      sent += 1;
+      selectedSmsCandidates.delete(entry.candidateId);
+    } catch {
+      failed += 1;
+    }
+  }
+  closeModal();
+  activeSmsContext = null;
+  notify(sent + " message" + (sent === 1 ? "" : "s") + " accepted by Zoom Phone" +
+    (failed ? "; " + failed + " failed" : "."), failed ? "error" : "");
+  if (activeView === "candidates") await viewCandidates();
 }
 
 async function viewMessages() {
@@ -4130,6 +4332,18 @@ document.addEventListener("click", async (event) => {
   const id = Number(button.dataset.id);
   const index = Number(button.dataset.index);
 
+  if (action === "toggle-sms-candidate") {
+    const candidateId = Number(button.dataset.candidateId);
+    if (button.checked) selectedSmsCandidates.add(candidateId);
+    else selectedSmsCandidates.delete(candidateId);
+    const bulkButton = $('[data-action="bulk-sms"]');
+    if (bulkButton) {
+      bulkButton.textContent = `Bulk SMS (${selectedSmsCandidates.size})`;
+      bulkButton.disabled = selectedSmsCandidates.size === 0;
+    }
+    return;
+  }
+
   if (action === "close-modal") {
     closeModal();
     return;
@@ -4187,6 +4401,8 @@ document.addEventListener("click", async (event) => {
     "draft": () => draftOutreach(id),
     "compose-sms": () => composeSmsFromButton(button),
     "send-sms": sendCandidateSms,
+    "bulk-sms": showBulkSmsComposer,
+    "send-bulk-sms": sendBulkSms,
     "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
     "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),
     "approve-draft": () => approveDraft(id),

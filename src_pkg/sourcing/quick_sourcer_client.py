@@ -53,12 +53,24 @@ def configured() -> bool:
 
 def status() -> dict:
     """Return internal readiness; public API code applies a stricter projection."""
+    try:
+        monitor = store.api_request_monitor(
+            _PROVIDER, stale_seconds=float(config.QUICK_SOURCER_TIMEOUT) + 30,
+        )
+    except Exception:
+        monitor = {
+            "provider": _PROVIDER, "active": 0, "started_5m": 0,
+            "completed_5m": 0, "failed_5m": 0,
+            "oldest_active_seconds": 0, "measured_at": time.time(),
+            "available": False,
+        }
     return {
         "enabled": bool(config.QUICK_SOURCER_ENABLED),
         "configured": bool(config.QUICK_SOURCER_API_KEY),
         "base_url": config.QUICK_SOURCER_BASE_URL,
         "search_pool": "dedicated" if config.QUICK_SOURCER_DEDICATED_IP else "shared",
         "typical_seconds": [30, 90],
+        "requests": monitor,
     }
 
 
@@ -259,40 +271,47 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
     # 502/503/504 early while the live-browser worker is being recycled; one
     # retry inside the remaining budget fixes that transient case without
     # allowing a single candidate to outlive the extension's request timeout.
+    activity_id = store.begin_api_request(_PROVIDER, f"{method.upper()} {path}")
+    outcome = "failed"
     deadline = time.monotonic() + config.QUICK_SOURCER_TIMEOUT
     response = None
-    for attempt in range(2):
-        remaining = deadline - time.monotonic()
-        if remaining <= 1:
-            raise httpx.TimeoutException("Quick Sourcer request budget expired.")
-        try:
-            response = httpx.request(
-                method,
-                f"{config.QUICK_SOURCER_BASE_URL}{path}",
-                json=payload,
-                headers={"X-API-Key": config.QUICK_SOURCER_API_KEY},
-                timeout=remaining,
-            )
-        except httpx.TransportError:
-            if attempt or deadline - time.monotonic() <= 2:
-                raise
+    try:
+        for attempt in range(2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 1:
+                raise httpx.TimeoutException("Quick Sourcer request budget expired.")
+            try:
+                response = httpx.request(
+                    method,
+                    f"{config.QUICK_SOURCER_BASE_URL}{path}",
+                    json=payload,
+                    headers={"X-API-Key": config.QUICK_SOURCER_API_KEY},
+                    timeout=remaining,
+                )
+            except httpx.TransportError:
+                if attempt or deadline - time.monotonic() <= 2:
+                    raise
+                time.sleep(min(0.5, max(0.0, deadline - time.monotonic() - 1)))
+                continue
+            if response.status_code not in {502, 503, 504} or attempt:
+                break
+            if deadline - time.monotonic() <= 2:
+                break
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic() - 1)))
-            continue
-        if response.status_code not in {502, 503, 504} or attempt:
-            break
-        if deadline - time.monotonic() <= 2:
-            break
-        time.sleep(min(0.5, max(0.0, deadline - time.monotonic() - 1)))
 
-    if response is None:  # defensive; the loop either returns a response or raises
-        raise httpx.TransportError("Quick Sourcer returned no response.")
-    if response.status_code in (401, 403):
-        raise PermissionError("Quick Sourcer rejected the configured API key.")
-    if response.status_code == 404:
-        return {"found": False}
-    response.raise_for_status()
-    body = response.json()
-    return body if isinstance(body, dict) else {}
+        if response is None:
+            raise httpx.TransportError("Quick Sourcer returned no response.")
+        if response.status_code in (401, 403):
+            raise PermissionError("Quick Sourcer rejected the configured API key.")
+        if response.status_code == 404:
+            outcome = "completed"
+            return {"found": False}
+        response.raise_for_status()
+        body = response.json()
+        outcome = "completed"
+        return body if isinstance(body, dict) else {}
+    finally:
+        store.finish_api_request(activity_id, outcome)
 
 
 def _failure(exc: Exception, *, dedicated_ip: bool = False) -> dict:

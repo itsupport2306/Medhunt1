@@ -1587,6 +1587,22 @@ body.extension-shell .indeed-candidate-list {
 .selection-summary span { display: block; }
 .selection-summary strong { color: var(--rx-navy); font-size: 20px; line-height: 1; }
 .selection-summary span { margin-top: 3px; font-size: 11px; }
+.nexus-delivery-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 0 15px 12px;
+  padding: 10px 12px;
+  border: 1px solid #b9ddd8;
+  border-radius: 9px;
+  color: var(--rx-muted);
+  background: #f2fafa;
+  font-size: 11px;
+}
+.nexus-delivery-summary strong { color: var(--rx-teal-dark); }
+.nexus-delivery-summary span b { color: var(--rx-ink); }
+.nexus-delivery-summary.is-pending { border-style: dashed; }
 .lookup-button {
   width: 100%;
   min-height: 48px;

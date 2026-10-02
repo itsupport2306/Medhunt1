@@ -172,6 +172,10 @@ const professionalProfileResumePromises = new Map();
 let indeedScanState = { phase: "idle", found: 0, total: 0 };
 let indeedLookupState = new Map();
 let indeedLookupSummary = null;
+let nexusDeliverySummary = null;
+let nexusDeliveryCandidateIds = [];
+let nexusDeliveryPollTimer = null;
+let nexusDeliveryGeneration = 0;
 let indeedResultFilter = "all";
 let indeedLookupScope = new Set();
 let indeedLookupProfiles = [];
@@ -1560,6 +1564,7 @@ function startProfessionalProfileResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("Professional profile resumes could not be saved.", "error");
       }
+      refreshTrackedNexusDeliveries();
     }
   })();
 }
@@ -2207,7 +2212,8 @@ function renderIndeedProfiles(scan = {}) {
           ${failed ? `<button type="button" role="tab" aria-selected="${indeedResultFilter === "failed"}" tabindex="${indeedResultFilter === "failed" ? "0" : "-1"}" class="summary-tile failed${indeedResultFilter === "failed" ? " active" : ""}" data-action="filter-indeed-results" data-filter="failed">
             <span class="summary-signal" aria-hidden="true"></span><span>Retry</span><strong>${failed}</strong>
           </button>` : ""}
-        </div>` : `
+        </div>
+        ${nexusDeliverySummaryMarkup()}` : `
         <div class="capture-toolbar">
           <div class="queue-heading">
             <span class="section-kicker">Profiles on this page</span>
@@ -2277,6 +2283,71 @@ function showIndeedSaveStatus(state, message) {
   if (!element) return;
   element.textContent = message;
   element.className = `sync-status small ${state}`;
+}
+
+function nexusDeliverySummaryMarkup() {
+  if (!nexusDeliverySummary) return "";
+  if (nexusDeliverySummary.loading) {
+    return `<div class="nexus-delivery-summary is-pending" role="status">Checking Nexus upload results...</div>`;
+  }
+  if (nexusDeliverySummary.enabled === false) {
+    return `<div class="nexus-delivery-summary" role="status"><strong>Nexus upload</strong><span>Disabled for this backend.</span></div>`;
+  }
+  const uploaded = Number(nexusDeliverySummary.uploaded) || 0;
+  const pending = Number(nexusDeliverySummary.pending) || 0;
+  const notUploaded = Number(nexusDeliverySummary.not_uploaded) || 0;
+  return `<div class="nexus-delivery-summary${pending ? " is-pending" : ""}" role="status" aria-live="polite">
+    <strong>Nexus upload</strong>
+    <span><b>${uploaded}</b> uploaded</span>
+    <span><b>${pending}</b> pending</span>
+    <span><b>${notUploaded}</b> not uploaded</span>
+  </div>`;
+}
+
+function stopNexusDeliveryPolling() {
+  clearTimeout(nexusDeliveryPollTimer);
+  nexusDeliveryPollTimer = null;
+}
+
+async function refreshNexusDeliverySummary(generation, attempt = 0) {
+  if (generation !== nexusDeliveryGeneration || !nexusDeliveryCandidateIds.length) return;
+  try {
+    const summary = await api("/nexus/delivery-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ candidate_ids: nexusDeliveryCandidateIds }),
+      timeout: 20000,
+    });
+    if (generation !== nexusDeliveryGeneration) return;
+    nexusDeliverySummary = summary;
+    if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
+    if (attempt < 20 && (Number(summary?.pending) > 0 || indeedResumeBatchState.active)) {
+      nexusDeliveryPollTimer = setTimeout(
+        () => refreshNexusDeliverySummary(generation, attempt + 1), 3000,
+      );
+    }
+  } catch {
+    if (generation !== nexusDeliveryGeneration) return;
+    nexusDeliverySummary = null;
+  }
+}
+
+function trackNexusDeliveries(candidateIds) {
+  const ids = [...new Set((candidateIds || []).map(Number).filter(Number.isInteger))];
+  stopNexusDeliveryPolling();
+  nexusDeliveryGeneration += 1;
+  nexusDeliveryCandidateIds = ids;
+  if (!ids.length) {
+    nexusDeliverySummary = null;
+    return;
+  }
+  nexusDeliverySummary = { loading: true, selected: ids.length };
+  if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
+  void refreshNexusDeliverySummary(nexusDeliveryGeneration);
+}
+
+function refreshTrackedNexusDeliveries() {
+  if (nexusDeliveryCandidateIds.length) trackNexusDeliveries(nexusDeliveryCandidateIds);
 }
 
 async function ensureProfessionalProfileResume(profile) {
@@ -3089,6 +3160,9 @@ async function lookupSelectedIndeedCandidates() {
   clearTimeout(indeedAutoScanTimer);
   indeedAutoScanTimer = null;
   indeedLookupInProgress = true;
+  stopNexusDeliveryPolling();
+  nexusDeliverySummary = null;
+  nexusDeliveryCandidateIds = [];
   // Invalidate any quiet scan that was already awaiting a content-script
   // response before the recruiter pressed Lookup.
   indeedScanGeneration += 1;
@@ -3257,6 +3331,7 @@ async function lookupSelectedIndeedCandidates() {
     `${indeedLookupSummary.errors ? `; ${indeedLookupSummary.errors} could not be checked` : ""}`,
     indeedLookupSummary.errors ? "error" : "",
   );
+    trackNexusDeliveries(lookupTargets.map((profile) => profile._candidateId));
     if (professionalProfileResumeQueue.length) {
       await startProfessionalProfileResumeBatch(professionalProfileResumeQueue);
     } else if (resumeQueue.length) {
@@ -3555,6 +3630,7 @@ function startLinkedinResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("LinkedIn profile PDFs were unavailable.", "error");
       }
+      refreshTrackedNexusDeliveries();
 
       const pending = pendingSourcingContext;
       pendingSourcingContext = null;
@@ -3645,6 +3721,7 @@ function startIndeedResumeBatch(profiles) {
       } else if (completed.failed) {
         notify("Resumes could not be saved.", "error");
       }
+      refreshTrackedNexusDeliveries();
 
       let currentTab = null;
       try {

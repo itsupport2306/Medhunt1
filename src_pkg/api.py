@@ -56,7 +56,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.27.0"
+APP_VERSION = "3.28.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -139,6 +139,15 @@ async def authenticate_local_api_requests(request: Request, call_next):
             )
     request.state.user = None
     request.state.healthboard_extension_token = ""
+    if request.url.path.startswith("/internal/halo/"):
+        expected = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+        supplied = request.headers.get("x-medhunt-service-token", "").strip()
+        if not expected:
+            return JSONResponse({"detail": "Halo service access is not configured."}, status_code=503)
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse({"detail": "Invalid Halo service credential."}, status_code=401)
+        request.state.user = {"sub": "halo-service", "role": "service"}
+        return await call_next(request)
     if (
         healthboard_auth.enabled()
         and request.method.upper() != "OPTIONS"
@@ -283,6 +292,10 @@ class ContactLookupBatchIn(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
     run_id: str = Field(min_length=8, max_length=80)
     confirmed: bool = False
+
+
+class NexusDeliverySummaryIn(BaseModel):
+    candidate_ids: list[int] = Field(min_length=1, max_length=100)
 
 
 class QuickSourcerFindIn(BaseModel):
@@ -493,6 +506,26 @@ def health():
             "sequential" if _quick_sourcer_selected() else "bulk"
         ),
     }
+
+
+@app.post("/internal/halo/api-monitor")
+def halo_api_monitor():
+    status = quick_sourcer_client.status()
+    return {
+        "service": "medhunt1",
+        "lookup_provider": {
+            "enabled": bool(status.get("enabled")),
+            "configured": bool(status.get("configured")),
+            "search_pool": str(status.get("search_pool") or ""),
+            **dict(status.get("requests") or {}),
+        },
+    }
+
+
+@app.post("/nexus/delivery-summary")
+def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
+    _request_user(request)
+    return store.nexus_delivery_summary(body.candidate_ids)
 
 
 @app.get("/auth/config")

@@ -116,6 +116,10 @@ CREATE TABLE IF NOT EXISTS lookup_run_items(
   found INTEGER DEFAULT 0, cached INTEGER DEFAULT 0,
   trace TEXT DEFAULT '{}', created REAL NOT NULL,
   UNIQUE(run_id, source_identity, phase));
+CREATE TABLE IF NOT EXISTS api_request_activity(
+  request_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
+  operation TEXT DEFAULT '', status TEXT DEFAULT 'active',
+  started REAL NOT NULL, finished REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS nexus_candidate_links(
   identity_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
   nexus_candidate_id TEXT NOT NULL UNIQUE, created REAL, updated REAL);
@@ -148,6 +152,8 @@ CREATE INDEX IF NOT EXISTS idx_resume_extractions_candidate
   ON resume_extractions(candidate_id);
 CREATE INDEX IF NOT EXISTS idx_provider_lookups_run ON provider_lookups(provider, run_id);
 CREATE INDEX IF NOT EXISTS idx_lookup_run_items_run ON lookup_run_items(run_id, phase);
+CREATE INDEX IF NOT EXISTS idx_api_request_activity_provider
+  ON api_request_activity(provider, status, started);
 CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready
   ON nexus_deliveries(status, next_attempt_at, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity
@@ -309,6 +315,12 @@ _POSTGRES_SCHEMA = (
          event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
          created DOUBLE PRECISION
        )""",
+    """CREATE TABLE IF NOT EXISTS api_request_activity(
+         request_id TEXT PRIMARY KEY, provider TEXT NOT NULL,
+         operation TEXT DEFAULT '', status TEXT DEFAULT 'active',
+         started DOUBLE PRECISION NOT NULL,
+         finished DOUBLE PRECISION DEFAULT 0
+       )""",
     """CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
          candidate_id BIGINT PRIMARY KEY, identity_key TEXT NOT NULL,
          blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}',
@@ -369,6 +381,8 @@ _POSTGRES_SCHEMA = (
     "ON resume_extractions(candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_provider_lookups_run ON provider_lookups(provider, run_id)",
     "CREATE INDEX IF NOT EXISTS idx_lookup_run_items_run ON lookup_run_items(run_id, phase)",
+    "CREATE INDEX IF NOT EXISTS idx_api_request_activity_provider "
+    "ON api_request_activity(provider, status, started)",
     "CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready "
     "ON nexus_deliveries(status, next_attempt_at, lease_until)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity "
@@ -405,7 +419,7 @@ _CANDIDATE_FIELDS = {
 _POSTGRES_REQUIRED_TABLES = (
     "users", "enrichment_events", "jobs", "candidates", "outreach", "talent_pools", "talent_pool_members",
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
-    "provider_lookups", "lookup_runs", "lookup_run_items",
+    "provider_lookups", "lookup_runs", "lookup_run_items", "api_request_activity",
     "nexus_candidate_links", "nexus_candidate_checks", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
@@ -440,7 +454,7 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_candidates_master", "idx_pool_members_candidate",
     "idx_campaign_members_candidate", "idx_resumes_candidate",
     "idx_resume_extractions_candidate", "idx_provider_lookups_run",
-    "idx_lookup_run_items_run", "idx_nexus_deliveries_ready",
+    "idx_lookup_run_items_run", "idx_api_request_activity_provider", "idx_nexus_deliveries_ready",
     "idx_nexus_one_processing_identity", "idx_nexus_one_active_identity",
     "idx_watcher_email_delivery_status",
     "idx_sms_conversations_candidate", "idx_sms_conversations_session",
@@ -2385,6 +2399,131 @@ def list_nexus_deliveries(candidate_id=None):
                 (int(candidate_id),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+
+def nexus_delivery_summary(candidate_ids):
+    """Return the latest durable Nexus outcome for each requested candidate."""
+    ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
+    if not ordered_ids:
+        return {"selected": 0, "uploaded": 0, "pending": 0, "not_uploaded": 0, "items": []}
+    placeholders = ",".join("?" for _ in ordered_ids)
+    with _conn() as connection:
+        candidates = {
+            int(row["id"])
+            for row in connection.execute(
+                f"SELECT id FROM candidates WHERE id IN ({placeholders})", ordered_ids,
+            ).fetchall()
+        }
+        resumes = {
+            int(row["candidate_id"]): int(row["resume_count"] or 0)
+            for row in connection.execute(
+                f"""SELECT candidate_id,COUNT(*) AS resume_count FROM resumes
+                    WHERE candidate_id IN ({placeholders}) GROUP BY candidate_id""",
+                ordered_ids,
+            ).fetchall()
+        }
+        rows = connection.execute(
+            f"""SELECT * FROM nexus_deliveries
+                WHERE candidate_id IN ({placeholders}) ORDER BY created,id""",
+            ordered_ids,
+        ).fetchall()
+    latest = {}
+    for row in rows:
+        latest[int(row["candidate_id"])] = dict(row)
+    pending_states = {"pending", "processing", "writing", "retry"}
+    items = []
+    for candidate_id in ordered_ids:
+        delivery = latest.get(candidate_id)
+        status = str((delivery or {}).get("status") or "").casefold()
+        if status == "succeeded":
+            group, reason = "uploaded", ""
+        elif status in pending_states:
+            group, reason = "pending", ""
+        else:
+            group = "not_uploaded"
+            if delivery:
+                reason = status or "failed"
+            elif candidate_id not in candidates:
+                reason = "candidate_not_found"
+            elif not getattr(config, "NEXUS_SYNC_ENABLED", False):
+                reason = "nexus_disabled"
+            elif not resumes.get(candidate_id):
+                reason = "resume_not_saved"
+            else:
+                reason = "not_queued"
+        items.append({
+            "candidate_id": candidate_id,
+            "group": group,
+            "status": status or reason,
+            "reason": reason,
+        })
+    return {
+        "selected": len(ordered_ids),
+        "uploaded": sum(item["group"] == "uploaded" for item in items),
+        "pending": sum(item["group"] == "pending" for item in items),
+        "not_uploaded": sum(item["group"] == "not_uploaded" for item in items),
+        "enabled": bool(getattr(config, "NEXUS_SYNC_ENABLED", False)),
+        "items": items,
+    }
+
+
+def begin_api_request(provider: str, operation: str = "") -> str:
+    request_id = f"{time.time_ns():x}-{threading.get_ident():x}"
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO api_request_activity(
+                 request_id,provider,operation,status,started,finished
+               ) VALUES(?,?,?,'active',?,0)""",
+            (request_id, str(provider)[:80], str(operation)[:120], now),
+        )
+        connection.execute(
+            "DELETE FROM api_request_activity WHERE finished>0 AND finished<?",
+            (now - 604800,),
+        )
+    return request_id
+
+
+def finish_api_request(request_id: str, status: str = "completed") -> None:
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE api_request_activity SET status=?,finished=?
+               WHERE request_id=? AND status='active'""",
+            (str(status or "completed")[:40], time.time(), request_id),
+        )
+
+
+def api_request_monitor(provider: str, stale_seconds: float = 240.0) -> dict:
+    now = time.time()
+    stale_before = now - max(30.0, float(stale_seconds))
+    recent_before = now - 300.0
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE api_request_activity SET status='abandoned',finished=?
+               WHERE provider=? AND status='active' AND started<?""",
+            (now, provider, stale_before),
+        )
+        row = connection.execute(
+            """SELECT
+                 SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,
+                 SUM(CASE WHEN started>=? THEN 1 ELSE 0 END) AS started_5m,
+                 SUM(CASE WHEN finished>=? AND status='completed' THEN 1 ELSE 0 END) AS completed_5m,
+                 SUM(CASE WHEN finished>=? AND status NOT IN ('active','completed') THEN 1 ELSE 0 END) AS failed_5m,
+                 MIN(CASE WHEN status='active' THEN started ELSE NULL END) AS oldest_active
+               FROM api_request_activity WHERE provider=?""",
+            (recent_before, recent_before, recent_before, provider),
+        ).fetchone()
+    active = int((row and row["active"]) or 0)
+    oldest = float((row and row["oldest_active"]) or 0)
+    return {
+        "provider": provider,
+        "active": active,
+        "started_5m": int((row and row["started_5m"]) or 0),
+        "completed_5m": int((row and row["completed_5m"]) or 0),
+        "failed_5m": int((row and row["failed_5m"]) or 0),
+        "oldest_active_seconds": round(max(0.0, now - oldest), 1) if oldest else 0,
+        "measured_at": now,
+    }
 
 
 # ---- resumes ----
