@@ -2355,12 +2355,14 @@ function nexusDeliverySummaryMarkup() {
   const uploaded = Number(nexusDeliverySummary.uploaded) || 0;
   const pending = Number(nexusDeliverySummary.pending) || 0;
   const alreadyInNexus = Number(nexusDeliverySummary.already_in_nexus) || 0;
+  const waitingForResume = Number(nexusDeliverySummary.waiting_for_resume) || 0;
   const notUploaded = Number(nexusDeliverySummary.not_uploaded) || 0;
   return `<div class="nexus-delivery-summary${pending ? " is-pending" : ""}" role="status" aria-live="polite">
     <strong>Nexus upload</strong>
     <span><b>${uploaded}</b> uploaded</span>
     <span><b>${pending}</b> pending</span>
     <span><b>${alreadyInNexus}</b> already in Nexus</span>
+    <span><b>${waitingForResume}</b> waiting for resume</span>
     <span><b>${notUploaded}</b> not uploaded</span>
   </div>`;
 }

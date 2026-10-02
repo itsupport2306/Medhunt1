@@ -2466,13 +2466,15 @@ def list_nexus_deliveries(candidate_id=None):
         return [dict(row) for row in rows]
 
 
-def nexus_delivery_summary(candidate_ids):
+def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=()):
     """Return the latest durable Nexus outcome for each requested candidate."""
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
+    waiting_resume_ids = {int(value) for value in waiting_resume_ids or []}
     if not ordered_ids:
         return {
             "selected": 0, "uploaded": 0, "pending": 0,
-            "already_in_nexus": 0, "not_uploaded": 0, "items": [],
+            "already_in_nexus": 0, "waiting_for_resume": 0,
+            "not_uploaded": 0, "items": [],
         }
     placeholders = ",".join("?" for _ in ordered_ids)
     with _conn() as connection:
@@ -2522,6 +2524,8 @@ def nexus_delivery_summary(candidate_ids):
             group, reason = "uploaded", ""
         elif status in pending_states:
             group, reason = "pending", ""
+        elif not delivery and candidate_id in waiting_resume_ids:
+            group, reason = "waiting_for_resume", "resume_not_saved"
         else:
             group = "not_uploaded"
             if delivery:
@@ -2545,6 +2549,7 @@ def nexus_delivery_summary(candidate_ids):
         "uploaded": sum(item["group"] == "uploaded" for item in items),
         "pending": sum(item["group"] == "pending" for item in items),
         "already_in_nexus": sum(item["group"] == "already_in_nexus" for item in items),
+        "waiting_for_resume": sum(item["group"] == "waiting_for_resume" for item in items),
         "not_uploaded": sum(item["group"] == "not_uploaded" for item in items),
         "enabled": bool(getattr(config, "NEXUS_SYNC_ENABLED", False)),
         "items": items,

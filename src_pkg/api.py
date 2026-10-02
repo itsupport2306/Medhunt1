@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.2"
+APP_VERSION = "3.36.3"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -566,7 +566,23 @@ def halo_api_monitor():
 @app.post("/nexus/delivery-summary")
 def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
     _request_user(request)
-    return store.nexus_delivery_summary(body.candidate_ids)
+    waiting_resume_ids = []
+    if config.NEXUS_SYNC_ENABLED:
+        for candidate_id in dict.fromkeys(body.candidate_ids):
+            candidate = store.get_candidate(candidate_id)
+            if not candidate:
+                continue
+            if nexus_eligibility.stored_result(candidate).get("blocked"):
+                continue
+            projected = contact_access.project_candidate(candidate)
+            if (
+                projected.get("contacts_trusted") is True
+                and (projected.get("emails") or projected.get("phones"))
+            ):
+                waiting_resume_ids.append(candidate_id)
+    return store.nexus_delivery_summary(
+        body.candidate_ids, waiting_resume_ids=waiting_resume_ids,
+    )
 
 
 @app.post("/contact-lookup/queue")
