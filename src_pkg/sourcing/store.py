@@ -10,6 +10,8 @@ import json
 import sqlite3
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -2598,9 +2600,14 @@ def api_request_monitor(provider: str, stale_seconds: float = 240.0) -> dict:
                  SUM(CASE WHEN started>=? THEN 1 ELSE 0 END) AS started_5m,
                  SUM(CASE WHEN finished>=? AND status='completed' THEN 1 ELSE 0 END) AS completed_5m,
                  SUM(CASE WHEN finished>=? AND status NOT IN ('active','completed') THEN 1 ELSE 0 END) AS failed_5m,
-                 MIN(CASE WHEN status='active' THEN started ELSE NULL END) AS oldest_active
+                 MIN(CASE WHEN status='active' THEN started ELSE NULL END) AS oldest_active,
+                 AVG(CASE WHEN finished>=? AND finished>started
+                          AND status IN ('completed','failed')
+                     THEN (finished-started)*1000.0 ELSE NULL END) AS average_response_ms,
+                 SUM(CASE WHEN finished>=? AND finished>started
+                          AND status IN ('completed','failed') THEN 1 ELSE 0 END) AS measured_responses_5m
                FROM api_request_activity WHERE provider=?""",
-            (recent_before, recent_before, recent_before, provider),
+            (recent_before, recent_before, recent_before, recent_before, recent_before, provider),
         ).fetchone()
     active = int((row and row["active"]) or 0)
     oldest = float((row and row["oldest_active"]) or 0)
@@ -2610,6 +2617,9 @@ def api_request_monitor(provider: str, stale_seconds: float = 240.0) -> dict:
         "started_5m": int((row and row["started_5m"]) or 0),
         "completed_5m": int((row and row["completed_5m"]) or 0),
         "failed_5m": int((row and row["failed_5m"]) or 0),
+        "average_response_ms_5m": round(float(row["average_response_ms"]), 1)
+        if row and row["average_response_ms"] is not None else None,
+        "measured_responses_5m": int((row and row["measured_responses_5m"]) or 0),
         "oldest_active_seconds": round(max(0.0, now - oldest), 1) if oldest else 0,
         "measured_at": now,
     }
@@ -2625,12 +2635,24 @@ class ContactLookupQueueLimitError(ValueError):
         )
 
 
+def contact_lookup_user_limit(now: datetime | None = None) -> int | None:
+    """Return the user's active queue limit; no per-user cap after 4 PM Pacific."""
+    pacific_now = (now or datetime.now(ZoneInfo("America/Los_Angeles")))
+    if pacific_now.tzinfo is None:
+        pacific_now = pacific_now.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+    else:
+        pacific_now = pacific_now.astimezone(ZoneInfo("America/Los_Angeles"))
+    if pacific_now.hour >= 16:
+        return None
+    return int(config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER)
+
+
 def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "") -> list[dict]:
     now = time.time()
     normalized_run = str(run_id or "").strip()
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     owner = str(requested_by or "")[:200]
-    limit = int(config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER)
+    limit = contact_lookup_user_limit()
     with _CONTACT_LOOKUP_ENQUEUE_LOCK:
         with _conn() as connection:
             if connection.postgres:
@@ -2659,7 +2681,7 @@ def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = 
                 (owner,),
             ).fetchone()
             active = int((active_row and active_row["total"]) or 0)
-            if active + len(new_jobs) > limit:
+            if limit is not None and active + len(new_jobs) > limit:
                 raise ContactLookupQueueLimitError(
                     limit=limit, active=active, requested=len(new_jobs),
                 )

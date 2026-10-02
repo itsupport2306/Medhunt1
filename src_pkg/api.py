@@ -558,6 +558,9 @@ def halo_api_monitor():
             "queued": queue["queued"],
             "processing": queue["processing"],
             "concurrency_limit": config.CONTACT_LOOKUP_MAX_CONCURRENT,
+            "per_user_limit": store.contact_lookup_user_limit(),
+            "per_user_limit_timezone": "America/Los_Angeles",
+            "per_user_unlimited_after": "16:00",
             "current_request_id": current_request_id,
         },
     }
@@ -607,15 +610,25 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
 @app.get("/contact-lookup/queue/control")
 def contact_lookup_queue_control(request: Request):
     actor = _request_user(request)
-    return {"paused": store.contact_lookup_paused(str(actor.get("sub") or "local"))}
+    limit = store.contact_lookup_user_limit()
+    return {
+        "paused": store.contact_lookup_paused(str(actor.get("sub") or "local")),
+        "selection_limit": limit,
+        "limit_timezone": "America/Los_Angeles",
+        "unlimited_after": "16:00",
+    }
 
 
 @app.post("/contact-lookup/queue/control")
 def update_contact_lookup_queue_control(body: ContactLookupControlIn, request: Request):
     actor = _request_user(request)
-    return store.set_contact_lookup_paused(
+    result = store.set_contact_lookup_paused(
         str(actor.get("sub") or "local"), body.paused,
     )
+    result["selection_limit"] = store.contact_lookup_user_limit()
+    result["limit_timezone"] = "America/Los_Angeles"
+    result["unlimited_after"] = "16:00"
+    return result
 
 
 @app.post("/contact-lookup/queue/status")

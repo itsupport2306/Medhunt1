@@ -60,6 +60,7 @@ def status() -> dict:
         monitor = {
             "provider": _PROVIDER, "active": 0, "started_5m": 0,
             "completed_5m": 0, "failed_5m": 0,
+            "average_response_ms_5m": None, "measured_responses_5m": 0,
             "oldest_active_seconds": 0, "measured_at": time.time(),
             "available": False,
         }

@@ -10,7 +10,7 @@ const AUTH_STORAGE_KEY = "medhuntHealthBoardSession";
 const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
-const MAX_LOOKUP_SELECTION = 10;
+let MAX_LOOKUP_SELECTION = 10;
 
 
 
@@ -146,6 +146,7 @@ let backendHealth = null;
 let authConfig = { enabled: false, provider: "healthboard" };
 let authSession = null;
 let contactLookupPaused = false;
+let contactLookupControlTimer = null;
 let privacyConsent = false;
 let extensionWorkspaceStarted = false;
 let extensionWorkspaceStarting = false;
@@ -381,7 +382,13 @@ function updateContactLookupPauseUi() {
 async function loadContactLookupControl() {
   const control = await api("/contact-lookup/queue/control", { timeout: 15000 });
   contactLookupPaused = control?.paused === true;
+  if (control && Object.prototype.hasOwnProperty.call(control, "selection_limit")) {
+    MAX_LOOKUP_SELECTION = control.selection_limit == null
+      ? Infinity
+      : Math.max(1, Number(control.selection_limit) || 10);
+  }
   updateContactLookupPauseUi();
+  updateIndeedSelectionUi();
   return contactLookupPaused;
 }
 
@@ -393,7 +400,13 @@ async function toggleContactLookupPause() {
     timeout: 15000,
   });
   contactLookupPaused = control?.paused === true;
+  if (control && Object.prototype.hasOwnProperty.call(control, "selection_limit")) {
+    MAX_LOOKUP_SELECTION = control.selection_limit == null
+      ? Infinity
+      : Math.max(1, Number(control.selection_limit) || 10);
+  }
   updateContactLookupPauseUi();
+  updateIndeedSelectionUi();
   notify(contactLookupPaused ? "Contact lookup requests paused." : "Contact lookup requests resumed.");
 }
 
@@ -1910,7 +1923,9 @@ function updateIndeedSelectionUi() {
   if (selectionToggle) {
     selectionToggle.textContent = indeedCandidates.length > 0 && count === Math.min(indeedCandidates.length, MAX_LOOKUP_SELECTION)
       ? "Clear selection"
-      : `Select up to ${MAX_LOOKUP_SELECTION}`;
+      : (Number.isFinite(MAX_LOOKUP_SELECTION)
+        ? `Select up to ${MAX_LOOKUP_SELECTION} before 4 PM PT`
+        : "Select all profiles");
   }
   document.querySelectorAll(".indeed-select").forEach((checkbox) => {
     checkbox.disabled = indeedScanState.phase === "lookup" || (
@@ -3216,11 +3231,12 @@ async function lookupSelectedIndeedCandidates() {
     throw new Error("Wait for the current resumes to finish saving.");
   }
   if (indeedLookupInProgress) throw new Error("A candidate lookup is already in progress.");
+  await loadContactLookupControl();
   if (contactLookupPaused) throw new Error("Contact requests are paused. Click Resume before starting a lookup.");
   const profiles = selectedIndeedProfiles();
   if (!profiles.length) throw new Error(`Select at least one ${activeSourcingPlatform.label} profile.`);
   if (profiles.length > MAX_LOOKUP_SELECTION) {
-    throw new Error(`Select no more than ${MAX_LOOKUP_SELECTION} candidates at one time.`);
+    throw new Error(`Select no more than ${MAX_LOOKUP_SELECTION} candidates before 4:00 PM Pacific.`);
   }
   indeedLookupProfiles = profiles.slice();
   clearTimeout(indeedAutoScanTimer);
@@ -3356,12 +3372,18 @@ async function lookupSelectedIndeedCandidates() {
   const publicRecordLookup = sequentialLookupMode();
   if (publicRecordLookup && lookupTargets.length) {
     const candidateIds = lookupTargets.map((profile) => Number(profile._candidateId));
-    await api("/contact-lookup/queue", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ candidate_ids: candidateIds, run_id: lookupRunId, confirmed: true }),
-      timeout: 30000,
-    });
+    for (let start = 0; start < candidateIds.length; start += CONTACT_BATCH_SIZE) {
+      await api("/contact-lookup/queue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidate_ids: candidateIds.slice(start, start + CONTACT_BATCH_SIZE),
+          run_id: lookupRunId,
+          confirmed: true,
+        }),
+        timeout: 30000,
+      });
+    }
     const profilesById = new Map(
       lookupTargets.map((profile) => [Number(profile._candidateId), profile]),
     );
@@ -3376,18 +3398,26 @@ async function lookupSelectedIndeedCandidates() {
     let pollFailures = 0;
     while (completedIds.size < candidateIds.length) {
       try {
-        const queue = await api("/contact-lookup/queue/status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ candidate_ids: candidateIds, run_id: lookupRunId, confirmed: true }),
-          timeout: 30000,
-        });
-        if (typeof queue?.paused === "boolean" && queue.paused !== contactLookupPaused) {
-          contactLookupPaused = queue.paused;
-          updateContactLookupPauseUi();
+        const queueItems = [];
+        for (let start = 0; start < candidateIds.length; start += CONTACT_BATCH_SIZE) {
+          const queue = await api("/contact-lookup/queue/status", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              candidate_ids: candidateIds.slice(start, start + CONTACT_BATCH_SIZE),
+              run_id: lookupRunId,
+              confirmed: true,
+            }),
+            timeout: 30000,
+          });
+          if (typeof queue?.paused === "boolean" && queue.paused !== contactLookupPaused) {
+            contactLookupPaused = queue.paused;
+            updateContactLookupPauseUi();
+          }
+          queueItems.push(...(queue?.items || []));
         }
         pollFailures = 0;
-        for (const job of queue?.items || []) {
+        for (const job of queueItems) {
           const candidateId = Number(job.candidate_id);
           const profile = profilesById.get(candidateId);
           if (!profile || completedIds.has(candidateId)) continue;
@@ -4419,7 +4449,7 @@ document.addEventListener("change", async (event) => {
   if (event.target.classList.contains("indeed-select")) {
     if (event.target.checked && indeedSelected.size >= MAX_LOOKUP_SELECTION) {
       event.target.checked = false;
-      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates at one time.`, "error");
+      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates before 4:00 PM Pacific.`, "error");
     } else if (event.target.checked) indeedSelected.add(event.target.dataset.key);
     else indeedSelected.delete(event.target.dataset.key);
     updateIndeedSelectionUi();
@@ -4572,6 +4602,11 @@ async function startExtensionWorkspace() {
       if (!health) return;
       try {
         await loadContactLookupControl();
+        if (!contactLookupControlTimer) {
+          contactLookupControlTimer = setInterval(() => {
+            loadContactLookupControl().catch(() => {});
+          }, 60_000);
+        }
       } catch {
         updateContactLookupPauseUi();
       }
