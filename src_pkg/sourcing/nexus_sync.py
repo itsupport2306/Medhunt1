@@ -28,6 +28,7 @@ from urllib.parse import quote
 
 import httpx
 
+from . import nexus_taxonomy
 from .person_name import identity_signature, is_name_suffix, normalize_person_name
 
 
@@ -727,6 +728,7 @@ def _specialty_master_labels(values: Sequence[str]) -> list[str]:
     expanded: list[str] = []
     for value in _text_values(values):
         expanded.append(value)
+        expanded.extend(nexus_taxonomy.specialty_labels((value,)))
         alias_key = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
         expanded.extend(_SPECIALTY_ALIASES.get(alias_key, ()))
     return _text_values(expanded)
@@ -918,6 +920,9 @@ def _profession_labels(role: str) -> tuple[str, ...]:
     for label, pattern in _PROFESSION_ROLE_PATTERNS:
         if pattern.search(text):
             return (label,)
+    taxonomy_labels = nexus_taxonomy.profession_labels_for_role(text)
+    if taxonomy_labels:
+        return taxonomy_labels
     return ("Unknown",)
 
 
@@ -1182,13 +1187,21 @@ def _build_profile(
                 )
             profile["referralSourceId"] = next(iter(ids))
 
+    role = str(identity.get("role") or "")
+    actual_specialties = _text_values(identity.get("specialties"))
+    initial_profession_values = (
+        (profession_name,) if profession_name else _profession_labels(role)
+    )
+    taxonomy_row = nexus_taxonomy.classify(
+        initial_profession_values, actual_specialties,
+    )
+    profession_values = (
+        (taxonomy_row.profession,) if taxonomy_row else initial_profession_values
+    )
+
     profession_id = _default_id(profile, "professionId", "professionIds")
     profession_inferred = False
     if not profile.get("jobId") and not profession_id:
-        role = str(identity.get("role") or "")
-        profession_values = (
-            (profession_name,) if profession_name else _profession_labels(role)
-        )
         profession_id = _preferred_master_id(
             client,
             "professions",
@@ -1201,13 +1214,15 @@ def _build_profile(
         profile["professionIds"] = [profession_id]
 
     specialty_id = _default_id(profile, "specialtyId", "specialtyIds")
-    actual_specialties = _text_values(identity.get("specialties"))
     if actual_specialties:
         # The captured specialty is candidate data, not a tenant default. It
         # therefore takes precedence over a configured generic specialty ID.
         # Try the source label first and then only approved semantic aliases.
         # This keeps the mapping deterministic and profession-aware.
-        specialty_values = _specialty_master_labels(actual_specialties)
+        specialty_values = _specialty_master_labels([
+            *((taxonomy_row.specialty,) if taxonomy_row else ()),
+            *actual_specialties,
+        ])
         specialty_row = None
         if profession_id:
             try:
