@@ -576,14 +576,14 @@ the original resume from being stored.
 Medhunt can automatically queue a newly saved enriched resume and its approved
 candidate data for LaborEdge Nexus. This is a backend-only integration: the
 extension receives neither Nexus credentials nor provider responses. Delivery
-is disabled by default and is queued only when the candidate has a current
-trusted email and phone. The resume row and durable delivery record are
+is disabled by default and is queued when the candidate has a current trusted
+email or trusted phone. The resume row and durable delivery record are
 committed together, so restarting the service does not lose pending work.
 PDFs larger than the configured Nexus upload limit are saved locally but are
 reported as `skipped_resume_too_large` instead of entering a doomed queue.
 If a resume was stored before trusted contacts became available, the newest
-stored resume is queued automatically as soon as a later lookup supplies both
-approved channels.
+stored resume is queued automatically as soon as a later lookup supplies an
+approved contact channel.
 
 Set these backend variables for the authentication method supplied by Nexus:
 
@@ -642,8 +642,8 @@ mapping exists, Medhunt sends the tenant's explicit Unknown profession and
 Unknown specialty pair. Profiles without a declared specialty can still use
 the configured fallback, or the tenant's Unknown/Other/General master data.
 
-For contacts, Nexus receives one primary email and one primary phone. The
-email is the first trusted, non-DNC address in provider order. Phone selection
+For contacts, Nexus receives the available primary email and/or primary phone.
+The email is the first trusted, non-DNC address in provider order. Phone selection
 prefers mobile/wireless over other callable lines, then current/recent evidence,
 connectivity, corroborating-source count, and finally stable provider order.
 

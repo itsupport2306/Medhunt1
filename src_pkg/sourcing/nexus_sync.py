@@ -1112,9 +1112,9 @@ def _build_profile(
             "Candidate first and last name are required for Nexus creation.",
             operation="payload_validation",
         )
-    if not profile["email"] or not profile["phone"]:
+    if not profile["email"] and not profile["phone"]:
         raise NexusPermanentError(
-            "Nexus creation requires both a trusted email and phone.",
+            "Nexus creation requires at least one trusted email or phone.",
             operation="payload_validation",
         )
 
