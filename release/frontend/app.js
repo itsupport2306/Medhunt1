@@ -10,6 +10,7 @@ const AUTH_STORAGE_KEY = "medhuntHealthBoardSession";
 const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
+const MAX_LOOKUP_SELECTION = 10;
 
 
 
@@ -1865,10 +1866,15 @@ function updateIndeedSelectionUi() {
   });
   const selectionToggle = $(".selection-toggle");
   if (selectionToggle) {
-    selectionToggle.textContent = indeedCandidates.length > 0 && count === indeedCandidates.length
+    selectionToggle.textContent = indeedCandidates.length > 0 && count === Math.min(indeedCandidates.length, MAX_LOOKUP_SELECTION)
       ? "Clear selection"
-      : "Select all";
+      : `Select up to ${MAX_LOOKUP_SELECTION}`;
   }
+  document.querySelectorAll(".indeed-select").forEach((checkbox) => {
+    checkbox.disabled = indeedScanState.phase === "lookup" || (
+      count >= MAX_LOOKUP_SELECTION && !checkbox.checked
+    );
+  });
   const selectAll = $("#indeedSelectAll");
   if (selectAll) {
     selectAll.checked = indeedCandidates.length > 0 && count === indeedCandidates.length;
@@ -1904,10 +1910,10 @@ function indeedResultStatus(profile) {
       : "";
   if (result.status === "queued") {
     const ahead = Math.max(0, Number(result.queue_position) || 0);
-    return `<span class="lookup-searching"><i aria-hidden="true"></i>In queue${ahead ? ` Â· ${ahead} ahead` : ""}</span>`;
+    return `<span class="lookup-searching"><i aria-hidden="true"></i>In queue${ahead ? ` Â· ${ahead} ahead` : ""}${result.request_id ? ` Â· ${escapeHtml(result.request_id)}` : ""}</span>`;
   }
   if (result.status === "looking_up" || result.status === "processing") {
-    return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact</span>`;
+    return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact${result.request_id ? ` Â· ${escapeHtml(result.request_id)}` : ""}</span>`;
   }
   if (result.status === "blocked") {
     const nexus = result.nexus_eligibility || {};
@@ -3159,6 +3165,9 @@ async function lookupSelectedIndeedCandidates() {
   if (indeedLookupInProgress) throw new Error("A candidate lookup is already in progress.");
   const profiles = selectedIndeedProfiles();
   if (!profiles.length) throw new Error(`Select at least one ${activeSourcingPlatform.label} profile.`);
+  if (profiles.length > MAX_LOOKUP_SELECTION) {
+    throw new Error(`Select no more than ${MAX_LOOKUP_SELECTION} candidates at one time.`);
+  }
   indeedLookupProfiles = profiles.slice();
   clearTimeout(indeedAutoScanTimer);
   indeedAutoScanTimer = null;
@@ -3326,13 +3335,16 @@ async function lookupSelectedIndeedCandidates() {
           if (!profile || completedIds.has(candidateId)) continue;
           if (["succeeded", "not_found", "blocked", "failed"].includes(job.status)) {
             completedIds.add(candidateId);
-            applyLookupResult(profile, job.result || { status: "failed" });
+            applyLookupResult(profile, {
+              ...(job.result || { status: "failed" }), request_id: job.request_id || "",
+            });
           } else {
             const previous = indeedLookupFor(profile);
             indeedLookupState.set(profile._selectionKey, {
               ...previous,
               status: job.status === "processing" ? "processing" : "queued",
               queue_position: Number(job.position) || 0,
+              request_id: job.request_id || "",
             });
             updateIndeedLookupProgressUi(profile);
           }
@@ -3400,9 +3412,10 @@ async function lookupSelectedIndeedCandidates() {
 }
 
 function toggleAllIndeedCandidates() {
-  indeedSelected = indeedSelected.size === indeedCandidates.length
+  const selectable = indeedCandidates.slice(0, MAX_LOOKUP_SELECTION);
+  indeedSelected = indeedSelected.size === selectable.length
     ? new Set()
-    : new Set(indeedCandidates.map((profile) => profile._selectionKey));
+    : new Set(selectable.map((profile) => profile._selectionKey));
   document.querySelectorAll(".indeed-select").forEach((checkbox) => {
     checkbox.checked = indeedSelected.has(checkbox.dataset.key);
   });
@@ -4345,17 +4358,20 @@ document.addEventListener("keydown", (event) => {
 
 document.addEventListener("change", async (event) => {
   if (event.target.classList.contains("indeed-select")) {
-    if (event.target.checked) indeedSelected.add(event.target.dataset.key);
+    if (event.target.checked && indeedSelected.size >= MAX_LOOKUP_SELECTION) {
+      event.target.checked = false;
+      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates at one time.`, "error");
+    } else if (event.target.checked) indeedSelected.add(event.target.dataset.key);
     else indeedSelected.delete(event.target.dataset.key);
     updateIndeedSelectionUi();
     return;
   }
   if (event.target.id === "indeedSelectAll") {
     indeedSelected = event.target.checked
-      ? new Set(indeedCandidates.map((profile) => profile._selectionKey))
+      ? new Set(indeedCandidates.slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
       : new Set();
     document.querySelectorAll(".indeed-select").forEach((checkbox) => {
-      checkbox.checked = event.target.checked;
+      checkbox.checked = indeedSelected.has(checkbox.dataset.key);
     });
     updateIndeedSelectionUi();
     return;

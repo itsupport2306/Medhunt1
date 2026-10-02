@@ -426,6 +426,7 @@ _POSTGRES_SCHEMA = (
 
 _POSTGRES_SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
+_CONTACT_LOOKUP_ENQUEUE_LOCK = threading.Lock()
 _POSTGRES_CONNECTION = None
 _POSTGRES_CONNECTION_LOCK = threading.RLock()
 _CANDIDATE_FIELDS = {
@@ -2554,22 +2555,63 @@ def api_request_monitor(provider: str, stale_seconds: float = 240.0) -> dict:
     }
 
 
+class ContactLookupQueueLimitError(ValueError):
+    def __init__(self, *, limit: int, active: int, requested: int):
+        self.limit = int(limit)
+        self.active = int(active)
+        self.requested = int(requested)
+        super().__init__(
+            f"You can have at most {self.limit} contact lookups queued or processing at one time."
+        )
+
+
 def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "") -> list[dict]:
     now = time.time()
     normalized_run = str(run_id or "").strip()
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     owner = str(requested_by or "")[:200]
-    with _conn() as connection:
-        for candidate_id in ordered_ids:
-            job_key = f"{owner}:{normalized_run}:{candidate_id}"
-            connection.execute(
-                """INSERT INTO contact_lookup_queue(
-                     job_key,run_id,candidate_id,requested_by,status,attempts,
-                     next_attempt_at,lease_until,result,last_error,created,updated
-                   ) VALUES(?,?,?,?,'queued',0,0,0,'{}','',?,?)
-                   ON CONFLICT(job_key) DO NOTHING""",
-                (job_key, normalized_run, candidate_id, owner, now, now),
-            )
+    limit = int(config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER)
+    with _CONTACT_LOOKUP_ENQUEUE_LOCK:
+        with _conn() as connection:
+            if connection.postgres:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))", (f"contact-lookup:{owner}",),
+                )
+            keys = [f"{owner}:{normalized_run}:{candidate_id}" for candidate_id in ordered_ids]
+            existing = set()
+            if keys:
+                placeholders = ",".join("?" for _ in keys)
+                existing = {
+                    str(row["job_key"])
+                    for row in connection.execute(
+                        f"SELECT job_key FROM contact_lookup_queue WHERE job_key IN ({placeholders})",
+                        keys,
+                    ).fetchall()
+                }
+            new_jobs = [
+                (candidate_id, job_key)
+                for candidate_id, job_key in zip(ordered_ids, keys)
+                if job_key not in existing
+            ]
+            active_row = connection.execute(
+                """SELECT COUNT(*) AS total FROM contact_lookup_queue
+                   WHERE requested_by=? AND status IN ('queued','retry','processing')""",
+                (owner,),
+            ).fetchone()
+            active = int((active_row and active_row["total"]) or 0)
+            if active + len(new_jobs) > limit:
+                raise ContactLookupQueueLimitError(
+                    limit=limit, active=active, requested=len(new_jobs),
+                )
+            for candidate_id, job_key in new_jobs:
+                connection.execute(
+                    """INSERT INTO contact_lookup_queue(
+                         job_key,run_id,candidate_id,requested_by,status,attempts,
+                         next_attempt_at,lease_until,result,last_error,created,updated
+                       ) VALUES(?,?,?,?,'queued',0,0,0,'{}','',?,?)
+                       ON CONFLICT(job_key) DO NOTHING""",
+                    (job_key, normalized_run, candidate_id, owner, now, now),
+                )
     return list_contact_lookup_jobs(
         normalized_run, ordered_ids, requested_by=str(requested_by or ""),
     )["items"]
@@ -2700,8 +2742,14 @@ def contact_lookup_queue_counts() -> dict:
                  SUM(CASE WHEN status='processing' AND lease_until>? THEN 1 ELSE 0 END) AS processing
                FROM contact_lookup_queue""", (now,),
         ).fetchone()
+        processing_row = connection.execute(
+            """SELECT job_key FROM contact_lookup_queue
+               WHERE status='processing' AND lease_until>?
+               ORDER BY updated,id LIMIT 1""", (now,),
+        ).fetchone()
     return {"queued": int((row and row["queued"]) or 0),
-            "processing": int((row and row["processing"]) or 0)}
+            "processing": int((row and row["processing"]) or 0),
+            "processing_job_key": str((processing_row and processing_row["job_key"]) or "")}
 
 
 # ---- resumes ----
