@@ -1097,7 +1097,7 @@ body.extension-shell .indeed-workflow {
   flex: 0 0 68px;
   min-height: 68px;
   display: grid;
-  grid-template-columns: 112px minmax(72px, 1fr) auto;
+  grid-template-columns: 82px minmax(72px, 1fr) auto;
   align-items: center;
   gap: 10px;
   padding: 9px 12px 12px;
@@ -1107,8 +1107,8 @@ body.extension-shell .indeed-workflow {
 }
 
 .medhunt-mark {
-  width: 108px;
-  height: 48px;
+  width: 78px;
+  height: 36px;
   display: block;
   box-sizing: border-box;
   object-fit: contain;
@@ -1179,6 +1179,26 @@ body.extension-shell .indeed-workflow {
 .source-shell-header .panel-rescan-button:disabled {
   opacity: .48;
   cursor: wait;
+}
+.source-shell-header .contact-pause-button {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 9px;
+  color: #dceaf1;
+  background: rgba(255, 255, 255, .08);
+  font-size: 10px;
+  font-weight: 750;
+  cursor: pointer;
+}
+.source-shell-header .contact-pause-button:hover { background: rgba(255, 255, 255, .14); }
+.source-shell-header .contact-pause-button.is-paused {
+  color: #08233a;
+  border-color: #f7c66b;
+  background: #f7c66b;
 }
 .header-progress {
   position: absolute;
@@ -1657,11 +1677,12 @@ body.extension-shell .indeed-candidate-list {
 
 @media (max-width: 359px) {
   .source-shell-header.panel-brand {
-    grid-template-columns: 92px minmax(60px, 1fr) auto;
+    grid-template-columns: 72px minmax(58px, 1fr) auto;
     gap: 8px;
     padding-inline: 10px;
   }
-  .medhunt-mark { width: 88px; height: 42px; }
+  .medhunt-mark { width: 68px; height: 32px; }
+  .source-shell-header .contact-pause-button span:last-child { display: none; }
   .source-brand-copy strong { font-size: 13px; }
   .source-brand-copy span { font-size: 10px; }
   .source-shell-header .active-page-indicator { max-width: 76px; padding-inline: 7px; }

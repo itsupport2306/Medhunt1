@@ -145,6 +145,7 @@ let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
 let authConfig = { enabled: false, provider: "healthboard" };
 let authSession = null;
+let contactLookupPaused = false;
 let privacyConsent = false;
 let extensionWorkspaceStarted = false;
 let extensionWorkspaceStarting = false;
@@ -364,6 +365,36 @@ async function refreshHealth(showSuccess = false) {
     if (showSuccess) notify(IS_EXTENSION ? "Service unavailable." : (error.message || "Backend is unavailable."), "error");
     return null;
   }
+}
+
+function updateContactLookupPauseUi() {
+  const button = $('[data-action="toggle-contact-lookup-pause"]');
+  if (button) {
+    button.classList.toggle("is-paused", contactLookupPaused);
+    button.setAttribute("aria-pressed", String(contactLookupPaused));
+    button.title = contactLookupPaused ? "Resume contact lookup requests" : "Pause contact lookup requests";
+    button.innerHTML = `<span aria-hidden="true">${contactLookupPaused ? "&#9654;" : "&#10074;&#10074;"}</span><span>${contactLookupPaused ? "Resume" : "Pause"}</span>`;
+  }
+  updateSourceHeaderServiceStatus();
+}
+
+async function loadContactLookupControl() {
+  const control = await api("/contact-lookup/queue/control", { timeout: 15000 });
+  contactLookupPaused = control?.paused === true;
+  updateContactLookupPauseUi();
+  return contactLookupPaused;
+}
+
+async function toggleContactLookupPause() {
+  const control = await api("/contact-lookup/queue/control", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paused: !contactLookupPaused }),
+    timeout: 15000,
+  });
+  contactLookupPaused = control?.paused === true;
+  updateContactLookupPauseUi();
+  notify(contactLookupPaused ? "Contact lookup requests paused." : "Contact lookup requests resumed.");
 }
 
 function normalizeBackendUrl(raw) {
@@ -914,14 +945,20 @@ function renderAuthState() {
     const user = authSession.user;
     avatar.textContent = initials(user.name || user.email || "User");
     avatar.setAttribute("aria-label", user.name || user.email || "Signed-in user");
-    button.textContent = "Sign out";
-    button.dataset.action = "logout";
+    button.hidden = IS_EXTENSION;
+    button.disabled = IS_EXTENSION;
+    button.textContent = IS_EXTENSION ? "" : "Sign out";
+    button.dataset.action = IS_EXTENSION ? "" : "logout";
   } else if (authConfig.enabled) {
+    button.hidden = false;
+    button.disabled = false;
     avatar.textContent = "?";
     avatar.setAttribute("aria-label", "Sign in to Medhunt");
     button.textContent = "Sign in";
     button.dataset.action = "login";
   } else {
+    button.hidden = true;
+    button.disabled = true;
     button.textContent = "";
     button.dataset.action = "";
     avatar.textContent = "MT";
@@ -2135,7 +2172,9 @@ function updateSourceHeaderProgressUi() {
 function indeedPanelHeader() {
   const platformLabel = escapeHtml(activePageIndicatorLabel);
   const progress = sourceHeaderProgressSnapshot();
-  const serviceState = progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline");
+  const serviceState = contactLookupPaused
+    ? "Contact requests paused"
+    : (progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline"));
   return `
     <header class="source-shell-header panel-brand${progress ? " is-busy" : ""}" data-testid="source-header" data-progress-kind="${progress?.kind || "none"}" aria-busy="${progress ? "true" : "false"}">
       <img class="medhunt-mark" src="icons/medhunt-logo.png" alt="Med Hunt">
@@ -2145,6 +2184,9 @@ function indeedPanelHeader() {
       </div>
       <div class="source-header-actions">
         <span class="active-page-indicator"><i aria-hidden="true"></i>${platformLabel}</span>
+        <button type="button" class="contact-pause-button${contactLookupPaused ? " is-paused" : ""}" data-action="toggle-contact-lookup-pause" aria-pressed="${contactLookupPaused}" title="${contactLookupPaused ? "Resume" : "Pause"} contact lookup requests">
+          <span aria-hidden="true">${contactLookupPaused ? "&#9654;" : "&#10074;&#10074;"}</span><span>${contactLookupPaused ? "Resume" : "Pause"}</span>
+        </button>
         <button type="button" class="panel-rescan-button" data-action="refresh-indeed" title="Scan current page" aria-label="Scan current page" aria-disabled="${progress ? "true" : "false"}"${progress ? " disabled" : ""}>
           <span aria-hidden="true">&#8635;</span>
         </button>
@@ -2162,7 +2204,9 @@ function updateSourceHeaderServiceStatus() {
   const status = $("#sourceHeaderStatus");
   if (!status) return;
   const progress = sourceHeaderProgressSnapshot();
-  status.textContent = progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline");
+  status.textContent = contactLookupPaused
+    ? "Contact requests paused"
+    : (progress?.status || (backendHealth ? "Ready to find contacts" : "Service offline"));
 }
 
 function renderSourcingStatus(title, message, options = {}) {
@@ -3164,6 +3208,7 @@ async function lookupSelectedIndeedCandidates() {
     throw new Error("Wait for the current resumes to finish saving.");
   }
   if (indeedLookupInProgress) throw new Error("A candidate lookup is already in progress.");
+  if (contactLookupPaused) throw new Error("Contact requests are paused. Click Resume before starting a lookup.");
   const profiles = selectedIndeedProfiles();
   if (!profiles.length) throw new Error(`Select at least one ${activeSourcingPlatform.label} profile.`);
   if (profiles.length > MAX_LOOKUP_SELECTION) {
@@ -3329,6 +3374,10 @@ async function lookupSelectedIndeedCandidates() {
           body: JSON.stringify({ candidate_ids: candidateIds, run_id: lookupRunId, confirmed: true }),
           timeout: 30000,
         });
+        if (typeof queue?.paused === "boolean" && queue.paused !== contactLookupPaused) {
+          contactLookupPaused = queue.paused;
+          updateContactLookupPauseUi();
+        }
         pollFailures = 0;
         for (const job of queue?.items || []) {
           const candidateId = Number(job.candidate_id);
@@ -4420,6 +4469,17 @@ document.addEventListener("click", async (event) => {
     await go(button.dataset.view);
     return;
   }
+  if (action === "toggle-contact-lookup-pause") {
+    button.disabled = true;
+    try {
+      await toggleContactLookupPause();
+    } catch (error) {
+      notify(friendlyActionError(error), "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
 
   const actions = {
     "login": login,
@@ -4501,6 +4561,11 @@ async function startExtensionWorkspace() {
     );
     const servicePromise = refreshHealth().then(async (health) => {
       if (!health) return;
+      try {
+        await loadContactLookupControl();
+      } catch {
+        updateContactLookupPauseUi();
+      }
       try {
         await loadJobs();
       } catch {

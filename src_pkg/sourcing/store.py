@@ -127,6 +127,9 @@ CREATE TABLE IF NOT EXISTS contact_lookup_queue(
   attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
   lease_until REAL DEFAULT 0, result TEXT DEFAULT '{}',
   last_error TEXT DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS contact_lookup_controls(
+  requested_by TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
+  updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS nexus_candidate_links(
   identity_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
   nexus_candidate_id TEXT NOT NULL UNIQUE, created REAL, updated REAL);
@@ -342,6 +345,10 @@ _POSTGRES_SCHEMA = (
          last_error TEXT DEFAULT '', created DOUBLE PRECISION NOT NULL,
          updated DOUBLE PRECISION NOT NULL
        )""",
+    """CREATE TABLE IF NOT EXISTS contact_lookup_controls(
+         requested_by TEXT PRIMARY KEY, paused INTEGER NOT NULL DEFAULT 0,
+         updated DOUBLE PRECISION NOT NULL
+       )""",
     """CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
          candidate_id BIGINT PRIMARY KEY, identity_key TEXT NOT NULL,
          blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}',
@@ -448,7 +455,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "users", "enrichment_events", "jobs", "candidates", "outreach", "talent_pools", "talent_pool_members",
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
     "provider_lookups", "lookup_runs", "lookup_run_items", "api_request_activity",
-    "contact_lookup_queue",
+    "contact_lookup_queue", "contact_lookup_controls",
     "nexus_candidate_links", "nexus_candidate_checks", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
@@ -2620,6 +2627,46 @@ def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = 
     )["items"]
 
 
+def contact_lookup_paused(requested_by: str) -> bool:
+    owner = str(requested_by or "")[:200]
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT paused FROM contact_lookup_controls WHERE requested_by=?", (owner,),
+        ).fetchone()
+    return bool(row and row["paused"])
+
+
+def set_contact_lookup_paused(requested_by: str, paused: bool) -> dict:
+    owner = str(requested_by or "")[:200]
+    now = time.time()
+    with _CONTACT_LOOKUP_CLAIM_LOCK:
+        with _conn() as connection:
+            if connection.postgres:
+                connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    ("contact-lookup-global-claim",),
+                )
+            connection.execute(
+                """INSERT INTO contact_lookup_controls(requested_by,paused,updated)
+                   VALUES(?,?,?)
+                   ON CONFLICT(requested_by) DO UPDATE
+                   SET paused=excluded.paused,updated=excluded.updated""",
+                (owner, 1 if paused else 0, now),
+            )
+    return {"paused": bool(paused), "updated": now}
+
+
+def defer_contact_lookup_job(job_id: int, reason: str = "user_paused") -> None:
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE contact_lookup_queue
+               SET status='queued',attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,
+                   next_attempt_at=0,lease_until=0,last_error=?,updated=?
+               WHERE id=? AND status='processing'""",
+            (str(reason or "")[:1000], time.time(), int(job_id)),
+        )
+
+
 def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str = "") -> dict:
     normalized_run = str(run_id or "").strip()
     ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
@@ -2687,9 +2734,13 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
             if connection.postgres:
                 row = connection.execute(
                     """WITH picked AS (
-                         SELECT id FROM contact_lookup_queue
-                         WHERE status IN ('queued','retry') AND next_attempt_at<=?
-                         ORDER BY next_attempt_at,created,id
+                         SELECT q0.id FROM contact_lookup_queue q0
+                         WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
+                           AND NOT EXISTS (
+                             SELECT 1 FROM contact_lookup_controls control
+                             WHERE control.requested_by=q0.requested_by AND control.paused=1
+                           )
+                         ORDER BY q0.next_attempt_at,q0.created,q0.id
                          FOR UPDATE SKIP LOCKED LIMIT 1
                        )
                        UPDATE contact_lookup_queue q
@@ -2700,9 +2751,13 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                 ).fetchone()
                 return dict(row) if row else None
             row = connection.execute(
-                """SELECT * FROM contact_lookup_queue
-                   WHERE status IN ('queued','retry') AND next_attempt_at<=?
-                   ORDER BY next_attempt_at,created,id LIMIT 1""", (now,),
+                """SELECT q0.* FROM contact_lookup_queue q0
+                   WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
+                     AND NOT EXISTS (
+                       SELECT 1 FROM contact_lookup_controls control
+                       WHERE control.requested_by=q0.requested_by AND control.paused=1
+                     )
+                   ORDER BY q0.next_attempt_at,q0.created,q0.id LIMIT 1""", (now,),
             ).fetchone()
             if not row:
                 return None

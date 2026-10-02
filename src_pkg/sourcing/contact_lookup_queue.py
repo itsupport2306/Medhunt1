@@ -67,6 +67,9 @@ def process_once() -> dict | None:
     if not job:
         return None
     candidate_id = int(job["candidate_id"])
+    if store.contact_lookup_paused(str(job.get("requested_by") or "")):
+        store.defer_contact_lookup_job(int(job["id"]))
+        return {"status": "paused", "job_id": int(job["id"])}
     if not quick_sourcer_client.configured():
         return _retry(job, "lookup_provider_unavailable")
     candidate = store.get_candidate(candidate_id)

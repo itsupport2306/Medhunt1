@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.32.0"
+APP_VERSION = "3.33.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -295,6 +295,10 @@ class ContactLookupBatchIn(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
     run_id: str = Field(min_length=8, max_length=80)
     confirmed: bool = False
+
+
+class ContactLookupControlIn(BaseModel):
+    paused: bool
 
 
 class NexusDeliverySummaryIn(BaseModel):
@@ -559,14 +563,29 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
     ]}
 
 
+@app.get("/contact-lookup/queue/control")
+def contact_lookup_queue_control(request: Request):
+    actor = _request_user(request)
+    return {"paused": store.contact_lookup_paused(str(actor.get("sub") or "local"))}
+
+
+@app.post("/contact-lookup/queue/control")
+def update_contact_lookup_queue_control(body: ContactLookupControlIn, request: Request):
+    actor = _request_user(request)
+    return store.set_contact_lookup_paused(
+        str(actor.get("sub") or "local"), body.paused,
+    )
+
+
 @app.post("/contact-lookup/queue/status")
 def contact_lookup_queue_status(body: ContactLookupBatchIn, request: Request):
     actor = _request_user(request)
+    owner = str(actor.get("sub") or "local")
     data = store.list_contact_lookup_jobs(
         body.run_id, body.candidate_ids,
-        requested_by=str(actor.get("sub") or "local"),
+        requested_by=owner,
     )
-    return {**data, "items": [
+    return {**data, "paused": store.contact_lookup_paused(owner), "items": [
         _public_contact_lookup_job(item) for item in data["items"]
     ]}
 
@@ -1139,7 +1158,9 @@ def _record_enrichment(request: Request | None, candidate_id: int, status: str,
 
 @app.post("/candidates/{cid}/contact-lookup")
 def enrich_one(cid: int, request: Request = None):
-    _request_user(request)
+    actor = _request_user(request)
+    if store.contact_lookup_paused(str(actor.get("sub") or "local")):
+        raise HTTPException(409, "Contact lookup requests are paused. Resume them in the extension.")
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
@@ -1417,7 +1438,9 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
 
 @app.post("/contact-lookup/batch")
 def contact_lookup_batch(body: ContactLookupBatchIn, request: Request = None):
-    _request_user(request)
+    actor = _request_user(request)
+    if store.contact_lookup_paused(str(actor.get("sub") or "local")):
+        raise HTTPException(409, "Contact lookup requests are paused. Resume them in the extension.")
     """Vendor-neutral browser endpoint with a deliberately minimal response."""
     result = _quick_sourcer_lookup_batch(body)
     for candidate_id, item in (result.get("results") or {}).items():
