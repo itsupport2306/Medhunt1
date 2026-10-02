@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.3"
+APP_VERSION = "3.36.4"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
