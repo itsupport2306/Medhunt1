@@ -108,6 +108,33 @@ def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
     return bool(response.json().get("recorded", True))
 
 
+def medhunt_ceipal_candidate(*, user_id: str, candidate: dict) -> dict:
+    """Ask Halo to check and create this Ceipal-assigned candidate.
+
+    Ceipal secrets stay in Halo's server environment; Medhunt sends only the
+    enriched candidate fields and the authenticated Halo user id.
+    """
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not enabled() or not token:
+        raise RuntimeError("Halo service access is not configured for Ceipal routing.")
+    response = httpx.post(
+        _url("/api/extension/medhunt/ceipal-candidate"),
+        headers={"X-Medhunt-Service-Token": token},
+        json={"user_id": str(user_id or ""), **dict(candidate or {})},
+        timeout=config.MEDHUNT_CEIPAL_TIMEOUT_SECONDS,
+    )
+    if response.status_code >= 400:
+        try:
+            detail = str(response.json().get("detail") or "")
+        except ValueError:
+            detail = ""
+        raise RuntimeError(detail or f"Halo Ceipal check returned HTTP {response.status_code}.")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("Halo Ceipal check returned an invalid response.")
+    return payload
+
+
 def list_recruiters(token: str) -> list[dict]:
     response = httpx.get(
         _url("/api/extension/team/recruiters"),

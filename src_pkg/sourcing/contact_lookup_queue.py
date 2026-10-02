@@ -6,7 +6,7 @@ import threading
 import time
 
 from . import (
-    config, healthboard_auth, nexus_delivery, nexus_eligibility,
+    ats_routing, config, healthboard_auth, nexus_delivery,
     quick_sourcer_client, store,
 )
 
@@ -80,36 +80,40 @@ def process_once() -> dict | None:
             "location_match": None,
         })
     try:
-        eligibility = nexus_eligibility.check_candidate(candidate, fresh=True)
-        if eligibility.get("blocked"):
-            return _terminal(job, "blocked", {
-                "status": "blocked", "emails": [], "phones": [],
-                "phone_contacts": [], "resume_required": False,
-                "location_match": None, "nexus_eligibility": eligibility,
-            })
         result = quick_sourcer_client.lookup_candidate(candidate_id)
         if result.get("status") == "failed":
             return _retry(job, "temporary_lookup_failure")
-        eligibility = nexus_eligibility.check_candidate(
-            store.get_candidate(candidate_id) or candidate, fresh=True,
-        )
-        if eligibility.get("blocked"):
-            return _terminal(job, "blocked", {
-                "status": "blocked", "emails": [], "phones": [],
-                "phone_contacts": [], "resume_required": False,
-                "location_match": None, "nexus_eligibility": eligibility,
-            })
-        try:
-            nexus_delivery.queue_latest_resume_if_ready(candidate_id)
-        except Exception as exc:
-            logging.getLogger("medhunt.nexus").warning(
-                "Nexus queueing deferred for candidate %s (%s).",
-                candidate_id, type(exc).__name__,
+        destination = "ceipal" if str(job.get("delivery_target") or "nexus").casefold() == "ceipal" else "nexus"
+        user_id = str(job.get("requested_by") or "")
+        ats_routing.set_candidate_target(candidate_id, destination, user_id)
+        if result.get("status") == "found":
+            eligibility = ats_routing.check_after_enrichment(
+                candidate_id, destination, user_id,
             )
+            if eligibility.get("blocked"):
+                return _terminal(job, "blocked", {
+                    "status": "blocked", "emails": [], "phones": [],
+                    "phone_contacts": [], "resume_required": False,
+                    "location_match": None,
+                    "ats_destination": destination,
+                    "ats_eligibility": eligibility,
+                    "nexus_eligibility": eligibility if destination == "nexus" else {},
+                })
+            result.update({
+                "ats_destination": destination,
+                "ats_eligibility": eligibility,
+            })
+            if destination == "nexus":
+                result["nexus_eligibility"] = eligibility
+                try:
+                    nexus_delivery.queue_latest_resume_if_ready(candidate_id, user_id)
+                except Exception as exc:
+                    logging.getLogger("medhunt.nexus").warning(
+                        "Nexus queueing deferred for candidate %s (%s).",
+                        candidate_id, type(exc).__name__,
+                    )
         status = "succeeded" if result.get("status") == "found" else "not_found"
         return _terminal(job, status, result)
-    except nexus_eligibility.NexusEligibilityUnavailable:
-        return _retry(job, "nexus_check_unavailable")
     except Exception as exc:
         logging.getLogger("medhunt.lookup").warning(
             "Queued candidate lookup failed for id %s (%s).",

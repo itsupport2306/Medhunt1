@@ -172,6 +172,8 @@ let indeedSelected = new Set();
 let indeedSaveStatus = null;
 const indeedSavePromises = new Map();
 const professionalProfileResumePromises = new Map();
+const storedResumeDownloadPromises = new Map();
+const completedStoredResumeDownloads = new Set();
 let indeedScanState = { phase: "idle", found: 0, total: 0 };
 let indeedLookupState = new Map();
 let indeedLookupSummary = null;
@@ -528,8 +530,24 @@ function preferredMessagingPhone(record) {
   return contacts.find((item) => item.kind === "mobile") || contacts[0] || null;
 }
 
+function nexusBlockLabel(nexus) {
+  const destination = nexus?.target || (nexus?.state?.includes("ceipal") ? "ceipal" : "nexus");
+  if (destination === "ceipal") {
+    if (nexus?.state === "already_in_ceipal") return "Already present in Ceipal";
+    if (nexus?.state === "unavailable") return "Ceipal check unavailable · try again later";
+    return "Ceipal check needs review";
+  }
+  switch (nexus?.state) {
+    case "active_in_nexus": return "Already active in Nexus";
+    case "identity_unverified": return "Possible Nexus match · identity could not be confirmed";
+    case "identity_search_unavailable": return "Nexus check needs an email or wireless phone number";
+    case "unavailable": return "Nexus check unavailable · try again later";
+    default: return "Nexus check needs review";
+  }
+}
+
 function candidateCard(candidate) {
-  const nexus = candidate.nexus_eligibility || {};
+  const nexus = candidate.ats_eligibility || candidate.nexus_eligibility || {};
   const nexusBlocked = nexus.blocked === true;
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
@@ -545,8 +563,10 @@ function candidateCard(candidate) {
     ? `<span class="contact-origin">Public record</span>`
     : "";
   const nexusNotice = nexusBlocked
-    ? `<div class="notice error"><strong>${nexus.state === "identity_unverified" ? "Possible Nexus match — identity could not be verified" : nexus.state === "identity_search_unavailable" ? "Nexus check needs name and location search support" : "Already active in Nexus"}</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
-    : "";
+    ? `<div class="notice error"><strong>${nexusBlockLabel(nexus)}</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
+    : nexus.state === "created_in_ceipal"
+      ? `<div class="notice success"><strong>Parsed to Ceipal</strong></div>`
+      : "";
   const contact = successful
     ? `<div class="contact">
         ${publicRecord}
@@ -699,9 +719,13 @@ async function submitIntake() {
 
 async function enrichCandidate(id) {
   const result = await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
-  const nexusState = result.nexus_eligibility?.state;
+  const eligibility = result.ats_eligibility || result.nexus_eligibility || {};
+  const nexusState = eligibility.state;
+  const destination = result.ats_destination || eligibility.target || "nexus";
   notify(result.status === "blocked"
-    ? nexusState === "identity_search_unavailable"
+    ? destination === "ceipal"
+      ? nexusBlockLabel(eligibility)
+      : nexusState === "identity_search_unavailable"
       ? "Cannot verify this candidate in Nexus until name and city/state search is supported."
       : nexusState === "identity_unverified"
         ? "Possible Nexus match needs identity review."
@@ -1572,11 +1596,19 @@ async function enrichProfessionalProfileAndResume(profile) {
 }
 
 function startProfessionalProfileResumeBatch(profiles) {
-  const queue = (profiles || []).filter((profile) => (
-    PROFESSIONAL_PROFILE_SOURCES.has(profile?.source)
-      && Number(profile._candidateId)
-      && (!indeedLookupFor(profile).resume || !profile._detailProfileCaptured)
-  ));
+  const seenCandidates = new Set();
+  const queue = (profiles || []).filter((profile) => {
+    const candidateId = Number(profile?._candidateId);
+    const result = indeedLookupFor(profile);
+    if (
+      !PROFESSIONAL_PROFILE_SOURCES.has(profile?.source) || !candidateId
+      || !hasCompleteIndeedContact(result)
+      || (result.resume && profile._detailProfileCaptured)
+      || seenCandidates.has(candidateId)
+    ) return false;
+    seenCandidates.add(candidateId);
+    return true;
+  });
   if (!queue.length || indeedResumeBatchState.active) return Promise.resolve();
 
   const first = queue[0];
@@ -1981,10 +2013,10 @@ function indeedResultStatus(profile) {
     return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact${result.request_id ? ` Â· ${escapeHtml(result.request_id)}` : ""}</span>`;
   }
   if (result.status === "blocked") {
-    const nexus = result.nexus_eligibility || {};
+    const nexus = result.ats_eligibility || result.nexus_eligibility || {};
     const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
     return `<div class="lookup-outcome">
-      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>${nexus.state === "identity_unverified" ? "Possible Nexus match · identity needs review" : nexus.state === "identity_search_unavailable" ? "Nexus check needs name and location search support" : "Already active in Nexus"}</span>
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>${nexusBlockLabel(nexus)}</span>
       ${details ? `<span class="lookup-detail">${escapeHtml(details)}</span>` : ""}
     </div>`;
   }
@@ -1998,8 +2030,11 @@ function indeedResultStatus(profile) {
     const shownEmails = emails.slice(0, ROW_CONTACT_LIMIT);
     const shownPhones = phoneContacts.slice(0, ROW_CONTACT_LIMIT);
     const messagingPhone = preferredMessagingPhone(result);
+    const parsedNotice = result.ats_eligibility?.state === "created_in_ceipal"
+      ? `<span class="lookup-state match"><i aria-hidden="true"></i>Parsed to Ceipal</span>`
+      : `<span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>`;
     return `<div class="lookup-contact">
-      <span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>
+      ${parsedNotice}
       ${shownEmails.map((email) => `<span class="lookup-value">${escapeHtml(email)}</span>`).join("")}
       ${shownPhones.map((phone) => `<span class="lookup-value">${escapeHtml(`${publicPhoneLabel(phone.kind)}: ${phone.value}`)}</span>`).join("")}
       ${moreContactsNote(
@@ -2328,6 +2363,7 @@ function renderIndeedProfiles(scan = {}) {
           return `<article class="capture-row${hasResults ? "" : " candidate-queue-card"}${indeedSelected.has(key) ? " selected" : ""}" data-profile-key="${escapeHtml(key)}" data-search="${escapeHtml(searchText)}">
             ${primary}
             ${hasResults || isLookingUp ? `<div class="capture-result">${indeedResultStatus(profile)}</div>` : ""}
+            ${hasResults ? nexusCandidateStatusMarkup(profile._candidateId) : ""}
             ${publicRecordButton(profile.name, profile.location, profile._candidateId || 0, "capture-row-action")}
             ${linkedinPdfControl(profile, originalIndex)}
           </article>`;
@@ -2364,6 +2400,29 @@ function showIndeedSaveStatus(state, message) {
   if (!element) return;
   element.textContent = message;
   element.className = `sync-status small ${state}`;
+}
+
+function nexusCandidateStatusMarkup(candidateId) {
+  if (nexusDeliverySummary?.enabled === false) {
+    return `<div class="nexus-candidate-status disabled" role="status">Nexus sync disabled</div>`;
+  }
+  const item = (nexusDeliverySummary?.items || []).find(
+    (entry) => Number(entry.candidate_id) === Number(candidateId),
+  );
+  if (!item) {
+    const label = nexusDeliverySummary?.loading ? "Checking Nexus status..." : "Nexus status unavailable";
+    return `<div class="nexus-candidate-status pending" role="status">${label}</div>`;
+  }
+  const states = {
+    uploaded: ["uploaded", "Parsed to Nexus"],
+    pending: ["pending", "Nexus upload pending"],
+    already_in_nexus: ["existing", "Already in Nexus"],
+    waiting_for_resume: ["waiting", "Waiting for resume before Nexus upload"],
+    not_uploaded: ["failed", "Not parsed to Nexus"],
+  };
+  const [state, label] = states[item.group] || ["failed", "Not parsed to Nexus"];
+  const reason = item.reason && item.reason !== item.group ? ` title="${escapeHtml(item.reason.replaceAll("_", " "))}"` : "";
+  return `<div class="nexus-candidate-status ${state}" role="status"${reason}>${label}</div>`;
 }
 
 function nexusDeliverySummaryMarkup() {
@@ -2440,6 +2499,7 @@ async function ensureProfessionalProfileResume(profile) {
   const documentProfile = profile?.profile_document;
   if (
     !["usnews", "medifind", "commonspirit", "sharecare"].includes(profile?.source) || !candidateId
+    || !hasCompleteIndeedContact(indeedLookupFor(profile))
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;
   const key = `${candidateId}|${JSON.stringify(documentProfile)}`;
@@ -2455,6 +2515,18 @@ async function ensureProfessionalProfileResume(profile) {
   updateIndeedLookupProgressUi(profile);
   const pending = (async () => {
     try {
+      const existingResume = await existingContactResume(candidateId);
+      if (existingResume) {
+        const latest = indeedLookupFor(profile);
+        indeedLookupState.set(profile._selectionKey, {
+          ...latest,
+          resume: existingResume,
+          resume_status: "stored",
+          resume_error: "",
+        });
+        updateIndeedLookupProgressUi(profile);
+        return existingResume;
+      }
       const attached = await api(`/candidates/${candidateId}/professional-profile-resume`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -3281,6 +3353,7 @@ async function lookupSelectedIndeedCandidates() {
   const resumeQueue = [];
   const linkedinResumeQueue = [];
   const professionalProfileResumeQueue = [];
+  const queuedResumeCandidateIds = new Set();
   const lookupRunId = globalThis.crypto?.randomUUID
     ? globalThis.crypto.randomUUID().replaceAll("-", "")
     : `lookup_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -3350,25 +3423,37 @@ async function lookupSelectedIndeedCandidates() {
         ? { type: "hometown", value: lookup.location_match.value.trim().slice(0, 160) }
         : null,
       nexus_eligibility: lookup?.nexus_eligibility || {},
+      ats_eligibility: lookup?.ats_eligibility || {},
+      ats_destination: lookup?.ats_destination || "nexus",
       resume: previous.resume || null,
       resume_status: previous.resume_status || "",
       resume_error: previous.resume_error || "",
     };
     indeedLookupState.set(profile._selectionKey, result);
-    if (profile.source === "indeed" && hasCompleteIndeedContact(result) && !result.resume) {
+    const candidateId = Number(profile._candidateId);
+    if (
+      profile.source === "indeed" && hasCompleteIndeedContact(result) && !result.resume
+      && !queuedResumeCandidateIds.has(candidateId)
+    ) {
       resumeQueue.push(profile);
+      queuedResumeCandidateIds.add(candidateId);
     }
     if (
       profile.source === "linkedin" && activeSourcingPlatform.automaticPdfCapture &&
-      result.status === "found" && !result.resume
+      hasCompleteIndeedContact(result) && !result.resume
+      && !queuedResumeCandidateIds.has(candidateId)
     ) {
       linkedinResumeQueue.push(profile);
+      queuedResumeCandidateIds.add(candidateId);
     }
     if (
       PROFESSIONAL_PROFILE_SOURCES.has(profile.source)
+      && hasCompleteIndeedContact(result)
       && (!result.resume || !profile._detailProfileCaptured)
+      && !queuedResumeCandidateIds.has(candidateId)
     ) {
       professionalProfileResumeQueue.push(profile);
+      queuedResumeCandidateIds.add(candidateId);
     }
     if (isIndeedMatch(result)) indeedLookupSummary.matched += 1;
     else if (result.status === "failed") indeedLookupSummary.errors += 1;
@@ -3631,6 +3716,11 @@ async function processPendingResumeEvents() {
 }
 
 async function saveStoredResumeDownload(profile, candidateId, resume) {
+  const key = `${Number(candidateId)}|${Number(resume?.id)}`;
+  if (!Number(candidateId) || !Number(resume?.id)) throw new Error("The stored resume could not be identified.");
+  if (completedStoredResumeDownloads.has(key)) return null;
+  if (storedResumeDownloadPromises.has(key)) return storedResumeDownloadPromises.get(key);
+  const pending = (async () => {
   const safeName = String(profile.name || "candidate")
     .replace(/[^a-z0-9 _-]/gi, "_")
     .trim()
@@ -3640,15 +3730,31 @@ async function saveStoredResumeDownload(profile, candidateId, resume) {
   try {
     const downloadId = await chrome.downloads.download({
       url: blobUrl,
-      filename: `MedhuntResumes/${safeName}_resume.pdf`,
+      filename: `MedhuntResumes/${safeName}_${Number(candidateId)}_resume.pdf`,
       saveAs: false,
+      conflictAction: "overwrite",
     });
     releaseResumeBlobUrlLater(blobUrl);
+    completedStoredResumeDownloads.add(key);
     return downloadId;
   } catch (error) {
     URL.revokeObjectURL(blobUrl);
     throw error;
   }
+  })();
+  storedResumeDownloadPromises.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    storedResumeDownloadPromises.delete(key);
+  }
+}
+
+async function existingContactResume(candidateId) {
+  const candidate = await api(`/candidates/${Number(candidateId)}`, { timeout: 20000 });
+  return (candidate?.resumes || []).find((resume) => (
+    resume?.contact_sheet_embedded === true || /_enriched\.pdf$/i.test(resume?.filename || "")
+  )) || null;
 }
 
 async function recoverStoredResume(candidateId, uploadStartedAt, timeoutMs = 120000) {
@@ -3680,7 +3786,7 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
   const current = indeedLookupFor(profile);
   if (
     profile?.source !== "linkedin" || !candidateId || current.resume ||
-    current.status !== "found" || !linkedinSlug(profile.source_url || "")
+    !hasCompleteIndeedContact(current) || !linkedinSlug(profile.source_url || "")
   ) return false;
 
   indeedLookupState.set(profile._selectionKey, {
@@ -3692,6 +3798,18 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
 
   let completion = null;
   try {
+    const existingResume = await existingContactResume(candidateId);
+    if (existingResume) {
+      const latest = indeedLookupFor(profile);
+      indeedLookupState.set(profile._selectionKey, {
+        ...latest,
+        resume: existingResume,
+        resume_status: "stored",
+        resume_error: "",
+      });
+      updateIndeedLookupProgressUi(profile);
+      return false;
+    }
     await chrome.tabs.update(Number(sourceTabId), {
       active: true,
       url: profile.source_url,
@@ -3799,9 +3917,17 @@ function startLinkedinResumeBatch(profiles) {
 }
 
 function startIndeedResumeBatch(profiles) {
-  const queue = (profiles || []).filter((profile) => (
-    profile?.source === "indeed" && Number(profile._candidateId)
-  ));
+  const seenCandidates = new Set();
+  const queue = (profiles || []).filter((profile) => {
+    const candidateId = Number(profile?._candidateId);
+    const current = indeedLookupFor(profile);
+    if (
+      profile?.source !== "indeed" || !candidateId || current.resume
+      || !hasCompleteIndeedContact(current) || seenCandidates.has(candidateId)
+    ) return false;
+    seenCandidates.add(candidateId);
+    return true;
+  });
   if (!queue.length || indeedResumeBatchState.active) return Promise.resolve();
 
   const first = queue[0];
@@ -3916,6 +4042,18 @@ async function downloadMatchedIndeedResume(profile) {
   updateIndeedLookupProgressUi(profile);
 
   try {
+    const existingResume = await existingContactResume(candidateId);
+    if (existingResume) {
+      const latest = indeedLookupFor(profile);
+      indeedLookupState.set(profile._selectionKey, {
+        ...latest,
+        resume: existingResume,
+        resume_status: "stored",
+        resume_error: "",
+      });
+      updateIndeedLookupProgressUi(profile);
+      return true;
+    }
     // Automatic capture stores the bytes returned by the proven MAIN-world
     // hook. Clear the older file-path tracker so a normal Indeed download does
     // not create a duplicate resume record in parallel.
@@ -4100,10 +4238,10 @@ async function copyDraft() {
 async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified phone number is required.");
   const preview = await api("/candidates/" + Number(candidateId) + "/sms-preview?phone=" + encodeURIComponent(phone));
-  if (preview.nexus_blocked) {
-    const nexus = preview.nexus_eligibility || {};
+  if (preview.ats_blocked || preview.nexus_blocked) {
+    const nexus = preview.ats_eligibility || preview.nexus_eligibility || {};
     const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
-    throw new Error("This candidate is already active in Nexus" + (details ? " (" + details + ")." : "."));
+    throw new Error(nexusBlockLabel(nexus) + (details ? " (" + details + ")." : "."));
   }
   if (preview.opted_out) throw new Error("This number has opted out and cannot be messaged.");
   if (preview.already_contacted) throw new Error("This candidate has already received SMS outreach.");
@@ -4178,8 +4316,8 @@ async function showBulkSmsComposer() {
       candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
       phone: preview.phone || candidatePhone,
       message: "Hello " + firstName + ", This is Brian from Radixsol. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
-      blocked: Boolean(preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
-      reason: preview.error || (preview.nexus_blocked ? "Already active in Nexus" : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
+      blocked: Boolean(preview.ats_blocked || preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
+      reason: preview.error || (preview.ats_blocked || preview.nexus_blocked ? nexusBlockLabel(preview.ats_eligibility || preview.nexus_eligibility || {}) : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
     });
   }
   if (!entries.length) throw new Error("The selected candidates have no verified phone numbers.");

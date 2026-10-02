@@ -45,6 +45,10 @@ CREATE TABLE IF NOT EXISTS candidates(
   contact_expires_at REAL DEFAULT 0,
   notes TEXT DEFAULT '', source TEXT DEFAULT '', source_url TEXT DEFAULT '',
   source_id TEXT DEFAULT '', created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS medhunt_ats_routes(
+  candidate_id INTEGER NOT NULL, user_id TEXT NOT NULL,
+  destination TEXT NOT NULL DEFAULT 'nexus', eligibility TEXT DEFAULT '{}',
+  updated REAL NOT NULL, PRIMARY KEY(candidate_id,user_id));
 CREATE TABLE IF NOT EXISTS outreach(
   id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER, channel TEXT,
   subject TEXT, body TEXT, status TEXT DEFAULT 'draft', created REAL);
@@ -128,7 +132,8 @@ CREATE TABLE IF NOT EXISTS api_request_activity(
 CREATE TABLE IF NOT EXISTS contact_lookup_queue(
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT UNIQUE NOT NULL,
   run_id TEXT NOT NULL, candidate_id INTEGER NOT NULL,
-  requested_by TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+  requested_by TEXT DEFAULT '', delivery_target TEXT DEFAULT 'nexus',
+  status TEXT DEFAULT 'queued',
   attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
   lease_until REAL DEFAULT 0, result TEXT DEFAULT '{}',
   last_error TEXT DEFAULT '', created REAL NOT NULL, updated REAL NOT NULL);
@@ -143,7 +148,7 @@ CREATE TABLE IF NOT EXISTS nexus_candidate_checks(
   blocked INTEGER NOT NULL DEFAULT 0, result TEXT DEFAULT '{}', checked REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS nexus_deliveries(
   id INTEGER PRIMARY KEY AUTOINCREMENT, candidate_id INTEGER NOT NULL,
-  resume_id INTEGER NOT NULL UNIQUE, identity_key TEXT NOT NULL,
+  resume_id INTEGER NOT NULL UNIQUE, identity_key TEXT NOT NULL, requested_by TEXT DEFAULT '',
   resume_checksum TEXT DEFAULT '', status TEXT DEFAULT 'pending',
   attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
   lease_until REAL DEFAULT 0, nexus_candidate_id TEXT DEFAULT '',
@@ -222,6 +227,11 @@ _POSTGRES_SCHEMA = (
          notes TEXT DEFAULT '', source TEXT DEFAULT '', source_url TEXT DEFAULT '',
          source_id TEXT DEFAULT '', created DOUBLE PRECISION, updated DOUBLE PRECISION
        )""",
+    """CREATE TABLE IF NOT EXISTS medhunt_ats_routes(
+         candidate_id BIGINT NOT NULL, user_id TEXT NOT NULL,
+         destination TEXT NOT NULL DEFAULT 'nexus', eligibility TEXT DEFAULT '{}',
+         updated DOUBLE PRECISION NOT NULL, PRIMARY KEY(candidate_id,user_id)
+       )""",
     """CREATE TABLE IF NOT EXISTS outreach(
          id BIGSERIAL PRIMARY KEY, candidate_id BIGINT, channel TEXT,
          subject TEXT, body TEXT, status TEXT DEFAULT 'draft', created DOUBLE PRECISION
@@ -290,7 +300,7 @@ _POSTGRES_SCHEMA = (
        )""",
     """CREATE TABLE IF NOT EXISTS nexus_deliveries(
          id BIGSERIAL PRIMARY KEY, candidate_id BIGINT NOT NULL,
-         resume_id BIGINT NOT NULL UNIQUE, identity_key TEXT NOT NULL,
+         resume_id BIGINT NOT NULL UNIQUE, identity_key TEXT NOT NULL, requested_by TEXT DEFAULT '',
          resume_checksum TEXT DEFAULT '', status TEXT DEFAULT 'pending',
          attempts INTEGER DEFAULT 0, next_attempt_at DOUBLE PRECISION DEFAULT 0,
          lease_until DOUBLE PRECISION DEFAULT 0,
@@ -346,7 +356,8 @@ _POSTGRES_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS contact_lookup_queue(
          id BIGSERIAL PRIMARY KEY, job_key TEXT UNIQUE NOT NULL,
          run_id TEXT NOT NULL, candidate_id BIGINT NOT NULL,
-         requested_by TEXT DEFAULT '', status TEXT DEFAULT 'queued',
+         requested_by TEXT DEFAULT '', delivery_target TEXT DEFAULT 'nexus',
+         status TEXT DEFAULT 'queued',
          attempts INTEGER DEFAULT 0,
          next_attempt_at DOUBLE PRECISION DEFAULT 0,
          lease_until DOUBLE PRECISION DEFAULT 0, result TEXT DEFAULT '{}',
@@ -389,6 +400,8 @@ _POSTGRES_SCHEMA = (
     "ALTER TABLE nexus_candidate_links ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE resume_capture_locks ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE nexus_deliveries ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE nexus_deliveries ADD COLUMN IF NOT EXISTS requested_by TEXT DEFAULT ''",
+    "ALTER TABLE contact_lookup_queue ADD COLUMN IF NOT EXISTS delivery_target TEXT DEFAULT 'nexus'",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS hometown TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''",
@@ -494,6 +507,7 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "provider_lookups": ("candidate_id",),
     "lookup_run_items": ("candidate_id",),
     "nexus_candidate_links": ("candidate_id",),
+    "contact_lookup_queue": ("delivery_target",),
     "resume_capture_locks": ("candidate_id",),
     "nexus_deliveries": ("candidate_id",),
     "sms_conversations": ("zoom_sender_user_id",),
@@ -705,6 +719,18 @@ def _conn():
         for name in ("sender_user_id", "sender_name", "sender_number", "zoom_user_id"):
             if name not in message_columns:
                 raw.execute(f"ALTER TABLE sms_messages ADD COLUMN {name} TEXT DEFAULT ''")
+        queue_columns = {
+            row["name"] for row in raw.execute("PRAGMA table_info(contact_lookup_queue)")
+        }
+        if "delivery_target" not in queue_columns:
+            raw.execute(
+                "ALTER TABLE contact_lookup_queue ADD COLUMN delivery_target TEXT DEFAULT 'nexus'"
+            )
+        nexus_delivery_columns = {
+            row["name"] for row in raw.execute("PRAGMA table_info(nexus_deliveries)")
+        }
+        if "requested_by" not in nexus_delivery_columns:
+            raw.execute("ALTER TABLE nexus_deliveries ADD COLUMN requested_by TEXT DEFAULT ''")
         yield connection
         raw.commit()
     except Exception:
@@ -837,6 +863,53 @@ def get_candidate(candidate_id):
             "SELECT * FROM candidates WHERE id=?", (candidate_id,)
         ).fetchone()
         return _row(row) if row else None
+
+
+def get_candidate_ats_route(candidate_id: int, user_id: str) -> dict | None:
+    owner = str(user_id or "").strip()[:200]
+    if not owner:
+        return None
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM medhunt_ats_routes WHERE candidate_id=? AND user_id=?",
+            (int(candidate_id), owner),
+        ).fetchone()
+    if not row:
+        return None
+    result = dict(row)
+    try:
+        result["eligibility"] = json.loads(result.get("eligibility") or "{}")
+    except (TypeError, ValueError):
+        result["eligibility"] = {}
+    return result
+
+
+def set_candidate_ats_route(
+    candidate_id: int, user_id: str, destination: str, eligibility=None,
+) -> dict:
+    owner = str(user_id or "").strip()[:200]
+    if not owner:
+        raise ValueError("A user id is required for ATS routing.")
+    target = "ceipal" if str(destination or "").casefold() == "ceipal" else "nexus"
+    existing = get_candidate_ats_route(candidate_id, owner)
+    saved_eligibility = (
+        dict(eligibility or {}) if eligibility is not None
+        else (existing.get("eligibility") or {} if existing and existing.get("destination") == target else {})
+    )
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO medhunt_ats_routes(candidate_id,user_id,destination,eligibility,updated)
+               VALUES(?,?,?,?,?) ON CONFLICT(candidate_id,user_id) DO UPDATE SET
+               destination=excluded.destination,eligibility=excluded.eligibility,
+               updated=excluded.updated""",
+            (int(candidate_id), owner, target,
+             json.dumps(saved_eligibility, separators=(",", ":")), now),
+        )
+    return {
+        "candidate_id": int(candidate_id), "user_id": owner,
+        "destination": target, "eligibility": saved_eligibility, "updated": now,
+    }
 
 
 def get_nexus_candidate_check(candidate_id: int):
@@ -2211,29 +2284,29 @@ def _nexus_identity_key(connection, candidate_id: int) -> str:
     return f"master:{int(master_id)}"
 
 
-def _enqueue_nexus_delivery(connection, candidate_id, resume_id, resume_checksum=""):
+def _enqueue_nexus_delivery(connection, candidate_id, resume_id, resume_checksum="", requested_by=""):
     identity_key = _nexus_identity_key(connection, int(candidate_id))
     now = time.time()
     connection.execute(
         """INSERT INTO nexus_deliveries(
-             candidate_id,resume_id,identity_key,resume_checksum,status,
+             candidate_id,resume_id,identity_key,resume_checksum,requested_by,status,
              attempts,next_attempt_at,lease_until,created,updated
-           ) VALUES(?,?,?,?,'pending',0,0,0,?,?)
+           ) VALUES(?,?,?,?,?,'pending',0,0,0,?,?)
            ON CONFLICT(resume_id) DO NOTHING""",
         (
             int(candidate_id), int(resume_id), identity_key,
-            str(resume_checksum or "").strip().lower(), now, now,
+            str(resume_checksum or "").strip().lower(), str(requested_by or "")[:200], now, now,
         ),
     )
     return identity_key
 
 
-def enqueue_nexus_delivery(candidate_id, resume_id, resume_checksum=""):
+def enqueue_nexus_delivery(candidate_id, resume_id, resume_checksum="", requested_by=""):
     """Idempotently queue one stored resume for backend-only Nexus delivery."""
     with _conn() as connection:
         with connection.transaction():
             _enqueue_nexus_delivery(
-                connection, candidate_id, resume_id, resume_checksum,
+                connection, candidate_id, resume_id, resume_checksum, requested_by,
             )
     return get_nexus_delivery_for_resume(resume_id)
 
@@ -2647,11 +2720,13 @@ def contact_lookup_user_limit(now: datetime | None = None) -> int | None:
     return int(config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER)
 
 
-def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "") -> list[dict]:
+def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "",
+                                delivery_target: str = "nexus") -> list[dict]:
     now = time.time()
     normalized_run = str(run_id or "").strip()
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     owner = str(requested_by or "")[:200]
+    target = "ceipal" if str(delivery_target or "").casefold() == "ceipal" else "nexus"
     limit = contact_lookup_user_limit()
     with _CONTACT_LOOKUP_ENQUEUE_LOCK:
         with _conn() as connection:
@@ -2688,11 +2763,11 @@ def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = 
             for candidate_id, job_key in new_jobs:
                 connection.execute(
                     """INSERT INTO contact_lookup_queue(
-                         job_key,run_id,candidate_id,requested_by,status,attempts,
+                         job_key,run_id,candidate_id,requested_by,delivery_target,status,attempts,
                          next_attempt_at,lease_until,result,last_error,created,updated
-                       ) VALUES(?,?,?,?,'queued',0,0,0,'{}','',?,?)
+                       ) VALUES(?,?,?,?,?,'queued',0,0,0,'{}','',?,?)
                        ON CONFLICT(job_key) DO NOTHING""",
-                    (job_key, normalized_run, candidate_id, owner, now, now),
+                    (job_key, normalized_run, candidate_id, owner, target, now, now),
                 )
     return list_contact_lookup_jobs(
         normalized_run, ordered_ids, requested_by=str(requested_by or ""),
@@ -2949,6 +3024,7 @@ def attach_resume(
     checksum_sha256="",
     etag="",
     queue_nexus=False,
+    requested_by="",
     extraction=None,
 ):
     if not get_candidate(candidate_id):
@@ -3006,7 +3082,9 @@ def attach_resume(
                     connection, resume_id, candidate_id, extraction, now=now,
                 )
             if queue_nexus and getattr(config, "NEXUS_SYNC_ENABLED", False):
-                _enqueue_nexus_delivery(connection, candidate_id, resume_id, checksum)
+                _enqueue_nexus_delivery(
+                    connection, candidate_id, resume_id, checksum, requested_by,
+                )
                 nexus_queued = True
     delivery = get_nexus_delivery_for_resume(resume_id) if nexus_queued else None
     if existing:

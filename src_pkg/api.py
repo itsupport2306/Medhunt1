@@ -35,7 +35,7 @@ from sourcing import (
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
     profile_resume, zoom_sms, nexus_eligibility,
-    contact_lookup_queue,
+    contact_lookup_queue, ats_routing,
 )
 
 
@@ -165,6 +165,7 @@ async def authenticate_local_api_requests(request: Request, call_next):
                 "sub": str(identity.get("user_id") or ""),
                 "email": str(identity.get("email") or ""),
                 "role": str(identity.get("role") or ""),
+                "delivery_targets": dict(identity.get("delivery_targets") or {}),
             }
             request.state.healthboard_extension_token = supplied
         except Exception:
@@ -468,10 +469,16 @@ def _public_lookup_result(result: dict) -> dict:
     }
 
 
-def _public_candidate(candidate: dict | None) -> dict:
+def _public_candidate(candidate: dict | None, actor: dict | None = None) -> dict:
     projected = contact_access.project_candidate(candidate)
-    nexus = nexus_eligibility.stored_result(candidate or {})
-    if nexus.get("blocked"):
+    identity = actor or {"sub": "local", "delivery_targets": {}}
+    ats = ats_routing.stored(
+        candidate,
+        str(identity.get("sub") or "local"),
+        ats_routing.destination_for(identity),
+    )
+    eligibility = ats.get("eligibility") or {}
+    if eligibility.get("blocked"):
         projected = {**projected, "emails": [], "phones": [], "phone_contacts": []}
     allowed = (
         "id", "name", "location", "job_id", "stage", "fit_score",
@@ -482,7 +489,10 @@ def _public_candidate(candidate: dict | None) -> dict:
     public["records_available"] = bool(
         str(projected.get("contact_source") or "") == "quick_sourcer"
     )
-    public["nexus_eligibility"] = nexus
+    public["ats_destination"] = ats.get("destination") or "nexus"
+    public["ats_eligibility"] = eligibility
+    # Retain the old field for already-shipped extension builds.
+    public["nexus_eligibility"] = eligibility if public["ats_destination"] == "nexus" else {}
     return public
 
 
@@ -568,7 +578,14 @@ def halo_api_monitor():
 
 @app.post("/nexus/delivery-summary")
 def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
-    _request_user(request)
+    actor = _request_user(request)
+    if ats_routing.destination_for(actor) != "nexus":
+        return {
+            "selected": len(set(body.candidate_ids)), "uploaded": 0,
+            "pending": 0, "already_in_nexus": 0,
+            "waiting_for_resume": 0, "not_uploaded": 0,
+            "enabled": False, "destination": "ceipal", "items": [],
+        }
     waiting_resume_ids = []
     if config.NEXUS_SYNC_ENABLED:
         for candidate_id in dict.fromkeys(body.candidate_ids):
@@ -596,6 +613,7 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
     try:
         items = store.enqueue_contact_lookup_jobs(
             body.run_id, body.candidate_ids, str(actor.get("sub") or "local"),
+            delivery_target=ats_routing.destination_for(actor),
         )
     except store.ContactLookupQueueLimitError as exc:
         raise HTTPException(
@@ -1013,21 +1031,23 @@ def _profile_row(body: ProfileImportIn, default_job_id: int | None = None):
     }
 
 
-def _import_profile(body: ProfileImportIn):
+def _import_profile(body: ProfileImportIn, actor: dict | None = None):
     row = _profile_row(body)
     if row["job_id"] is not None and not store.get_job(row["job_id"]):
         raise HTTPException(404, "job not found")
     result = store.upsert_candidate_profiles([row])[0]
-    return {**result, "candidate": _public_candidate(result["candidate"])}
+    return {**result, "candidate": _public_candidate(result["candidate"], actor)}
 
 
 @app.post("/candidates/import")
-def import_candidate(body: ProfileImportIn):
-    return _import_profile(body)
+def import_candidate(body: ProfileImportIn, request: Request):
+    actor = _request_user(request)
+    return _import_profile(body, actor)
 
 
 @app.post("/candidates/import/batch")
-def import_candidate_batch(body: ProfileBatchImportIn):
+def import_candidate_batch(body: ProfileBatchImportIn, request: Request):
+    actor = _request_user(request)
     if not body.profiles:
         raise HTTPException(400, "At least one profile is required.")
     if len(body.profiles) > 100:
@@ -1043,7 +1063,7 @@ def import_candidate_batch(body: ProfileBatchImportIn):
         {
             "id": result["id"],
             "imported": result["imported"],
-            "candidate": _public_candidate(result["candidate"]),
+            "candidate": _public_candidate(result["candidate"], actor),
         }
         for result in upserted
     ]
@@ -1058,18 +1078,20 @@ def import_candidate_batch(body: ProfileBatchImportIn):
 
 
 @app.get("/candidates")
-def candidates(job_id: int | None = None, stage: str | None = None):
+def candidates(request: Request, job_id: int | None = None, stage: str | None = None):
+    actor = _request_user(request)
     return [
-        _public_candidate(row)
+        _public_candidate(row, actor)
         for row in store.list_candidates(job_id=job_id, stage=stage)
     ]
 
 @app.get("/candidates/{cid}")
-def candidate(cid: int):
+def candidate(cid: int, request: Request):
+    actor = _request_user(request)
     c = store.get_candidate(cid)
     if not c:
         raise HTTPException(404, "not found")
-    projected = _public_candidate(c)
+    projected = _public_candidate(c, actor)
     projected["outreach"] = store.list_outreach(cid)
     projected["resumes"] = [
         _public_resume(resume) for resume in store.list_resumes(cid)
@@ -1116,7 +1138,7 @@ def create_campaign(body: CampaignCreateIn):
         raise HTTPException(400, str(exc))
 
 
-def _store_resume_pdf(cid: int, filename: str, data: bytes):
+def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "local"):
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
@@ -1133,8 +1155,10 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
             contact_sheet_candidate["name"] = accepted_resume_fields.get("full_name") or ""
         if not str(contact_sheet_candidate.get("location") or "").strip():
             contact_sheet_candidate["location"] = accepted_resume_fields.get("location") or ""
+    destination = ats_routing.stored(candidate, user_id).get("destination") or "nexus"
     nexus_contact_ready = bool(
-        config.NEXUS_SYNC_ENABLED
+        destination == "nexus"
+        and config.NEXUS_SYNC_ENABLED
         and contactable.get("contacts_trusted") is True
         and (contactable.get("phones") or contactable.get("emails"))
         and not nexus_eligibility.stored_result(candidate).get("blocked")
@@ -1158,7 +1182,9 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
     if existing:
         store.save_resume_extraction(existing["id"], cid, extraction)
         nexus_delivery = (
-            store.enqueue_nexus_delivery(cid, existing["id"], checksum)
+            store.enqueue_nexus_delivery(
+                cid, existing["id"], checksum, requested_by=user_id,
+            )
             if queue_nexus else None
         )
         return {
@@ -1181,6 +1207,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
             b"",
             size=size,
             queue_nexus=queue_nexus,
+            requested_by=user_id,
             extraction=extraction,
             **uploaded,
         )
@@ -1188,6 +1215,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
         resume = store.attach_resume(
             cid, filename, data, checksum_sha256=checksum,
             queue_nexus=queue_nexus,
+            requested_by=user_id,
             extraction=extraction,
         )
     result = {
@@ -1207,9 +1235,13 @@ def authenticated_session():
 
 
 @app.post("/candidates/{cid}/resume/from-download")
-def attach_downloaded_resume(cid: int, body: ResumeDownloadIn):
+def attach_downloaded_resume(cid: int, body: ResumeDownloadIn, request: Request):
     if not store.get_candidate(cid):
         raise HTTPException(404, "candidate not found")
+    actor = _request_user(request)
+    ats_routing.set_candidate_target(
+        cid, ats_routing.destination_for(actor), str(actor.get("sub") or ""),
+    )
     try:
         path = Path(body.path).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -1227,15 +1259,19 @@ def attach_downloaded_resume(cid: int, body: ResumeDownloadIn):
     if not data.startswith(b"%PDF"):
         raise HTTPException(400, "The downloaded file is not a valid PDF.")
     filename = Path(body.filename or path.name).name[:255] or "resume.pdf"
-    resume = _store_resume_pdf(cid, filename, data)
+    resume = _store_resume_pdf(cid, filename, data, str(actor.get("sub") or "local"))
     return {"attached": True, "resume": _public_resume(resume)}
 
 
 @app.post("/candidates/{cid}/resume/from-browser")
-def attach_captured_resume(cid: int, body: ResumeCaptureIn):
+def attach_captured_resume(cid: int, body: ResumeCaptureIn, request: Request):
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
+    actor = _request_user(request)
+    ats_routing.set_candidate_target(
+        cid, ats_routing.destination_for(actor), str(actor.get("sub") or ""),
+    )
     encoded = body.content_base64.strip()
     if encoded.lower().startswith("data:") and "," in encoded:
         encoded = encoded.split(",", 1)[1]
@@ -1255,7 +1291,7 @@ def attach_captured_resume(cid: int, body: ResumeCaptureIn):
     filename = Path(body.filename or "resume.pdf").name[:255] or "resume.pdf"
     if not filename.lower().endswith(".pdf"):
         filename = f"{filename}.pdf"
-    resume = _store_resume_pdf(cid, filename, data)
+    resume = _store_resume_pdf(cid, filename, data, str(actor.get("sub") or "local"))
     refreshed = contact_access.project_candidate(store.get_candidate(cid))
     return {
         "attached": True,
@@ -1301,6 +1337,35 @@ def _nexus_blocked_lookup(eligibility: dict) -> dict:
         "addresses": [], "resume_required": False, "location_match": None,
         "nexus_eligibility": eligibility,
     }
+
+
+def _ats_blocked_lookup(eligibility: dict) -> dict:
+    return {
+        "status": "blocked", "emails": [], "phones": [], "phone_contacts": [],
+        "addresses": [], "resume_required": False, "location_match": None,
+        "ats_destination": eligibility.get("target") or "nexus",
+        "ats_eligibility": eligibility,
+        "nexus_eligibility": eligibility if eligibility.get("target") == "nexus" else {},
+    }
+
+
+def _route_enriched_lookup(candidate_id: int, lookup: dict, actor: dict) -> dict:
+    destination = ats_routing.destination_for(actor)
+    user_id = str(actor.get("sub") or "local")
+    ats_routing.set_candidate_target(candidate_id, destination, user_id)
+    result = dict(lookup or {})
+    if result.get("status") != "found":
+        return {**result, "ats_destination": destination}
+    eligibility = ats_routing.check_after_enrichment(candidate_id, destination, user_id)
+    if eligibility.get("blocked"):
+        return _ats_blocked_lookup(eligibility)
+    result.update({
+        "ats_destination": destination,
+        "ats_eligibility": eligibility,
+    })
+    if destination == "nexus":
+        result["nexus_eligibility"] = eligibility
+    return result
 
 
 def _check_nexus_candidate(candidate: dict, *, fresh: bool = False) -> dict:
@@ -1358,25 +1423,24 @@ def enrich_one(cid: int, request: Request = None):
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
-    eligibility = _check_nexus_candidate(candidate, fresh=True)
-    if eligibility.get("blocked"):
-        return _nexus_blocked_lookup(eligibility)
     result = quick_sourcer_client.lookup_candidate(cid)
-    eligibility = _check_nexus_candidate(store.get_candidate(cid) or candidate, fresh=True)
-    if eligibility.get("blocked"):
-        result = _nexus_blocked_lookup(eligibility)
+    result = _route_enriched_lookup(cid, result, actor)
     _record_enrichment(
         request, cid,
         result.get("status") or result.get("enrich_status") or "unknown",
         provider="quick_sourcer",
     )
-    if result.get("status") != "blocked":
-        nexus_delivery.queue_latest_resume_if_ready(cid)
+    if (
+        result.get("status") != "blocked"
+        and result.get("ats_destination", "nexus") == "nexus"
+    ):
+        nexus_delivery.queue_latest_resume_if_ready(cid, str(actor.get("sub") or "local"))
     return result
 
 
 @app.post("/candidates/{cid}/identity/review")
-def review_candidate_identity(cid: int, body: IdentityReviewIn):
+def review_candidate_identity(cid: int, body: IdentityReviewIn, request: Request):
+    actor = _request_user(request)
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
@@ -1407,7 +1471,7 @@ def review_candidate_identity(cid: int, body: IdentityReviewIn):
             identity_verified_at=0,
             emails=[], phones=[], addresses=[], enrich_status="no_match",
         )
-    return _public_candidate(store.get_candidate(cid))
+    return _public_candidate(store.get_candidate(cid), actor)
 
 
 def _internal_contact_lookup_batch(
@@ -1557,7 +1621,7 @@ def _annotate_hometown_match(candidate_id: int, result: dict, hometown: str) -> 
     return annotated
 
 
-def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
+def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict:
     """Look each selected candidate up through Quick Sourcer, one at a time.
 
     The external API drives a real browser per person, so these cannot be
@@ -1575,27 +1639,9 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
             }
             continue
         try:
-            eligibility = nexus_eligibility.check_candidate(candidate, fresh=True)
-            if eligibility.get("blocked"):
-                results[str(candidate_id)] = _nexus_blocked_lookup(eligibility)
-                continue
-            results[str(candidate_id)] = quick_sourcer_client.lookup_candidate(candidate_id)
-            eligibility = nexus_eligibility.check_candidate(
-                store.get_candidate(candidate_id) or candidate, fresh=True,
-            )
-            if eligibility.get("blocked"):
-                results[str(candidate_id)] = _nexus_blocked_lookup(eligibility)
-                continue
-        except nexus_eligibility.NexusEligibilityUnavailable:
-            results[str(candidate_id)] = {
-                "status": "failed", "emails": [], "phones": [],
-                "phone_contacts": [], "resume_required": False,
-                "location_match": None,
-                "nexus_eligibility": {
-                    "state": "unavailable", "blocked": True, "checked": False,
-                },
-            }
-            continue
+            lookup = quick_sourcer_client.lookup_candidate(candidate_id)
+            lookup = _route_enriched_lookup(candidate_id, lookup, actor)
+            results[str(candidate_id)] = lookup
         except Exception as exc:
             # A malformed provider response or one database row must never turn
             # the entire selection into an HTTP 500. The panel can retry this
@@ -1610,16 +1656,23 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn) -> dict:
                 "phone_contacts": [], "resume_required": False,
                 "location_match": None,
             }
-        try:
-            nexus_delivery.queue_latest_resume_if_ready(candidate_id)
-        except Exception as exc:
-            # Nexus delivery is asynchronous follow-up. It must not invalidate
-            # a contact result that was already found and stored successfully.
-            logging.getLogger("medhunt.nexus").warning(
-                "Nexus queueing was deferred for candidate %s (%s).",
-                candidate_id,
-                type(exc).__name__,
-            )
+        if (
+            lookup.get("status") == "found"
+            and lookup.get("ats_destination", "nexus") == "nexus"
+            and not (lookup.get("ats_eligibility") or {}).get("blocked")
+        ):
+            try:
+                nexus_delivery.queue_latest_resume_if_ready(
+                    candidate_id, str(actor.get("sub") or "local"),
+                )
+            except Exception as exc:
+                # Nexus delivery is asynchronous follow-up. It must not invalidate
+                # a contact result that was already found and stored successfully.
+                logging.getLogger("medhunt.nexus").warning(
+                    "Nexus queueing was deferred for candidate %s (%s).",
+                    candidate_id,
+                    type(exc).__name__,
+                )
     return {
         "status": "ok",
         "results": results,
@@ -1636,7 +1689,7 @@ def contact_lookup_batch(body: ContactLookupBatchIn, request: Request = None):
     if store.contact_lookup_paused(str(actor.get("sub") or "local")):
         raise HTTPException(409, "Contact lookup requests are paused. Resume them in the extension.")
     """Vendor-neutral browser endpoint with a deliberately minimal response."""
-    result = _quick_sourcer_lookup_batch(body)
+    result = _quick_sourcer_lookup_batch(body, actor)
     for candidate_id, item in (result.get("results") or {}).items():
         _record_enrichment(
             request, int(candidate_id), item.get("status") or "unknown",
@@ -1729,15 +1782,23 @@ def _resolve_zoom_sms_sender(request: Request, *, strict: bool) -> dict | None:
 
 @app.get("/candidates/{candidate_id}/sms-preview")
 def sms_preview(candidate_id: int, phone: str, request: Request):
-    _request_user(request)
+    actor = _request_user(request)
     candidate = store.get_candidate(candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
-    eligibility = _check_nexus_candidate(candidate, fresh=True)
+    destination = ats_routing.destination_for(actor)
+    user_id = str(actor.get("sub") or "local")
+    stored_route = ats_routing.stored(candidate, user_id)
+    eligibility = stored_route.get("eligibility") or {}
+    if stored_route.get("destination") != destination or not eligibility:
+        raise HTTPException(409, "Enrich this candidate through your assigned ATS before messaging.")
     if eligibility.get("blocked"):
         return {
             "phone": phone, "opted_out": False, "already_contacted": False,
-            "nexus_blocked": True, "nexus_eligibility": eligibility,
+            "ats_blocked": True, "ats_destination": destination,
+            "ats_eligibility": eligibility,
+            "nexus_blocked": destination == "nexus",
+            "nexus_eligibility": eligibility if destination == "nexus" else {},
         }
     verified_phone = _candidate_sms_phone(candidate, phone)
     return {
@@ -1761,12 +1822,18 @@ def send_sms(body: SmsSendIn, request: Request):
     candidate = store.get_candidate(body.candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
-    eligibility = _check_nexus_candidate(candidate, fresh=True)
+    destination = ats_routing.destination_for(user)
+    user_id = str(user.get("sub") or "local")
+    stored_route = ats_routing.stored(candidate, user_id)
+    eligibility = stored_route.get("eligibility") or {}
+    if stored_route.get("destination") != destination or not eligibility:
+        raise HTTPException(409, "Enrich this candidate through your assigned ATS before messaging.")
     if eligibility.get("blocked"):
+        ats_name = "Ceipal" if destination == "ceipal" else "Nexus"
         owner = str(eligibility.get("recruiter") or "another recruiter")
-        status = str(eligibility.get("status") or "active")
+        status = str(eligibility.get("status") or "already present")
         raise HTTPException(
-            409, f"This candidate is already {status} in Nexus under {owner}.",
+            409, f"This candidate is already {status} in {ats_name} under {owner}.",
         )
     phone = _candidate_sms_phone(candidate, body.phone)
     if store.is_dnc(phone):
@@ -2034,7 +2101,7 @@ def records_status():
 
 
 @app.post("/candidates/{cid}/professional-profile-resume")
-def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeIn):
+def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeIn, request: Request):
     """Render and store an explicitly labeled public-profile résumé.
 
     Storage and Nexus delivery intentionally pass through the same audited
@@ -2044,6 +2111,9 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
+    actor = _request_user(request)
+    user_id = str(actor.get("sub") or "local")
+    ats_routing.set_candidate_target(cid, ats_routing.destination_for(actor), user_id)
     candidate_source = str(candidate.get("source") or "").strip().casefold()
     source_rules = {
         "usnews": (
@@ -2097,6 +2167,7 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
         cid,
         profile_resume.filename(candidate, profile),
         rendered,
+        user_id,
     )
     return {
         "attached": True,

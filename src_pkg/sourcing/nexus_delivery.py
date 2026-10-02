@@ -7,6 +7,7 @@ import threading
 import time
 
 from . import (
+    ats_routing,
     config,
     contact_access,
     nexus_eligibility,
@@ -41,7 +42,7 @@ _CLINICAL_ROLE_RE = re.compile(
 )
 
 
-def queue_latest_resume_if_ready(candidate_id: int) -> dict | None:
+def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> dict | None:
     """Queue a pre-existing latest resume after contacts become deliverable.
 
     Indeed normally captures the resume after enrichment, but recruiter uploads
@@ -52,6 +53,9 @@ def queue_latest_resume_if_ready(candidate_id: int) -> dict | None:
     if not config.NEXUS_SYNC_ENABLED:
         return None
     candidate = store.get_candidate(int(candidate_id))
+    route = ats_routing.stored(candidate or {}, user_id)
+    if route.get("destination") != "nexus":
+        return None
     if nexus_eligibility.stored_result(candidate or {}).get("blocked"):
         return None
     projected = contact_access.project_candidate(candidate)
@@ -70,6 +74,7 @@ def queue_latest_resume_if_ready(candidate_id: int) -> dict | None:
         int(candidate_id),
         int(latest["id"]),
         str(latest.get("checksum_sha256") or ""),
+        requested_by=user_id,
     )
 
 
@@ -183,6 +188,15 @@ def process_once() -> dict | None:
                 "Queued candidate or resume no longer exists.",
                 operation="local_storage",
                 code="local_record_missing",
+            )
+        route = ats_routing.stored(
+            candidate, str(delivery.get("requested_by") or "local"),
+        )
+        if route.get("destination") != "nexus":
+            raise nexus_sync.NexusPermanentError(
+                "Candidate is assigned to Ceipal.",
+                operation="ats_routing",
+                code="candidate_assigned_to_ceipal",
             )
         if nexus_eligibility.enabled():
             try:

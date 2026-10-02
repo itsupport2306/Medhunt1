@@ -46,9 +46,13 @@ def _public_record_projection(source: dict, projected: dict) -> dict:
         "phone_contacts": [
             {
                 "value": value,
-                "kind": "mobile" if "wireless" in str(
-                    (reported.get(value) or {}).get("type") or ""
-                ).casefold() else "other",
+                "kind": "mobile" if any(token in str(
+                    (reported.get(value) or {}).get("type")
+                    or (reported.get(value) or {}).get("phoneType")
+                    or (reported.get(value) or {}).get("phone_type")
+                    or (reported.get(value) or {}).get("lineType")
+                    or (reported.get(value) or {}).get("line_type") or ""
+                ).casefold() for token in ("wireless", "mobile", "cellular", "cell")) else "other",
             }
             for value in allowed.get("phones") or []
         ],

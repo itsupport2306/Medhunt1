@@ -99,6 +99,9 @@ HEALTHBOARD_BASE_URL = os.getenv("HEALTHBOARD_BASE_URL", "").strip().rstrip("/")
 HEALTHBOARD_AUTH_TIMEOUT = max(
     2.0, min(30.0, float(os.getenv("HEALTHBOARD_AUTH_TIMEOUT", "8")))
 )
+MEDHUNT_CEIPAL_TIMEOUT_SECONDS = max(
+    5.0, min(180.0, float(os.getenv("MEDHUNT_CEIPAL_TIMEOUT_SECONDS", "120")))
+)
 HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )

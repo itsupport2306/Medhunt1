@@ -131,28 +131,47 @@ def _empty(status_value: str, error: str = "") -> dict:
 
 def _phones(payload: dict, summary: dict) -> list[dict]:
     output, seen = [], set()
-    rows = summary.get("phones") or (payload.get("profile") or {}).get("phones") or []
-    for row in rows if isinstance(rows, list) else []:
-        value = _text(row.get("number") if isinstance(row, dict) else row)
+    profile = payload.get("profile") or {}
+    rows = []
+    for collection in (summary.get("phones"), profile.get("phones"), payload.get("phones")):
+        if isinstance(collection, list):
+            rows.extend(collection)
+        elif collection:
+            rows.append(collection)
+    for row in rows:
+        details = row if isinstance(row, dict) else {}
+        value = _text(
+            details.get("number") or details.get("value") or details.get("phone")
+            if details else row
+        )
         if not value or value in seen:
             continue
         seen.add(value)
-        details = row if isinstance(row, dict) else {}
         output.append({
             "value": value,
-            "type": _text(details.get("type")),
+            "type": _text(
+                details.get("type") or details.get("phoneType")
+                or details.get("phone_type") or details.get("lineType")
+                or details.get("line_type")
+            ),
             "carrier": _text(details.get("carrier")),
             "last_reported": _text(details.get("lastReported")),
             "primary": bool(details.get("isPrimary")),
         })
-    fallback = _text(payload.get("phone"))
-    if fallback and fallback not in seen:
-        output.insert(0, {
-            "value": fallback, "type": "", "carrier": "",
-            "last_reported": "", "primary": True,
-        })
+    fallback = payload.get("phone")
+    if fallback:
+        fallback_row = fallback if isinstance(fallback, dict) else {"number": fallback}
+        value = _text(fallback_row.get("number") or fallback_row.get("value") or fallback_row.get("phone"))
+        if value and value not in seen:
+            output.append({
+                "value": value,
+                "type": _text(fallback_row.get("type") or fallback_row.get("phoneType") or fallback_row.get("phone_type")),
+                "carrier": _text(fallback_row.get("carrier")),
+                "last_reported": _text(fallback_row.get("lastReported")),
+                "primary": bool(fallback_row.get("isPrimary", True)),
+            })
     output.sort(key=lambda item: not item["primary"])
-    return output[:40]
+    return output
 
 
 def _people(rows) -> list[dict]:
@@ -201,11 +220,21 @@ def normalize(payload: dict | None) -> dict:
     summary = source_payload.get("summary") or {}
     profile = source_payload.get("profile") or {}
     emails, masked, seen = [], [], set()
-    raw_emails = list(summary.get("emails") or [])
-    if source_payload.get("email"):
-        raw_emails.append(source_payload["email"])
+    raw_emails = []
+    profile_emails = profile.get("emails")
+    for collection in (summary.get("emails"), profile_emails, source_payload.get("emails")):
+        if isinstance(collection, list):
+            raw_emails.extend(collection)
+        elif collection:
+            raw_emails.append(collection)
+    for single in (summary.get("email"), profile.get("email"), source_payload.get("email")):
+        if single:
+            raw_emails.append(single)
     for value in raw_emails:
-        address = _text(value)
+        address = _text(
+            value.get("email") or value.get("address") or value.get("value")
+            if isinstance(value, dict) else value
+        )
         key = address.casefold()
         if not address or key in seen:
             continue
@@ -228,7 +257,7 @@ def normalize(payload: dict | None) -> dict:
         "external_id": source_payload.get("candidate_id"),
         "name": _text(source_payload.get("name") or profile.get("fullName")),
         "source": _text(source_payload.get("source")),
-        "emails": emails[:20],
+        "emails": emails,
         "masked_emails": masked[:20],
         "phones": _phones(source_payload, summary),
         "addresses": addresses[:40],
@@ -436,7 +465,10 @@ CONTACT_SOURCE = "quick_sourcer"
 
 def phone_kind(phone: dict) -> str:
     """Map a reported line type onto the two kinds the panel renders."""
-    return "mobile" if "wireless" in _text(phone.get("type")).casefold() else "other"
+    phone_type = _text(phone.get("type")).casefold()
+    return "mobile" if any(
+        token in phone_type for token in ("wireless", "mobile", "cellular", "cell")
+    ) else "other"
 
 
 def public_lookup_result(result: dict | None) -> dict:
@@ -464,9 +496,9 @@ def public_lookup_result(result: dict | None) -> dict:
         emails, phones, phone_contacts, found = [], [], [], False
     return {
         "status": "found" if found else ("failed" if status in ("error", "disabled") else "not_found"),
-        "emails": emails[:20],
-        "phones": phones[:40],
-        "phone_contacts": phone_contacts[:40],
+        "emails": emails,
+        "phones": phones,
+        "phone_contacts": phone_contacts,
         # A usable phone or email is sufficient for Indeed resume capture.
         # Masked provider email labels remain display-only/non-contact data.
         "resume_required": bool(found and (emails or phones)),
