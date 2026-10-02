@@ -509,12 +509,17 @@ function publicPhoneLabel(kind) {
   return "Phone";
 }
 
+function preferredMessagingPhone(record) {
+  const contacts = publicPhoneContacts(record);
+  return contacts.find((item) => item.kind === "mobile") || contacts[0] || null;
+}
+
 function candidateCard(candidate) {
   const nexus = candidate.nexus_eligibility || {};
   const nexusBlocked = nexus.blocked === true;
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
-  const mobileContact = publicPhoneContacts(candidate).find((item) => item.kind === "mobile") || null;
+  const messagingContact = preferredMessagingPhone(candidate);
   const phone = phoneContact?.value || "";
   const phoneLabel = publicPhoneLabel(phoneContact?.kind);
   const address = Array.isArray(candidate.addresses) ? candidate.addresses[0] : "";
@@ -551,11 +556,11 @@ function candidateCard(candidate) {
     ${nexusNotice}
     ${contact}
     <div class="candidate-actions">
-      ${IS_EXTENSION && mobileContact?.value && !nexusBlocked ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
+      ${IS_EXTENSION && messagingContact?.value && !nexusBlocked ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
       <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}"${nexusBlocked ? " disabled" : ""}>Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
-      ${mobileContact?.value && !nexusBlocked ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(mobileContact.value)}">Send SMS</button>` : ""}
+      ${messagingContact?.value && !nexusBlocked ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(messagingContact.value)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -1969,7 +1974,7 @@ function indeedResultStatus(profile) {
       : "";
     const shownEmails = emails.slice(0, ROW_CONTACT_LIMIT);
     const shownPhones = phoneContacts.slice(0, ROW_CONTACT_LIMIT);
-    const mobile = phoneContacts.find((phone) => phone.kind === "mobile");
+    const messagingPhone = preferredMessagingPhone(result);
     return `<div class="lookup-contact">
       <span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>
       ${shownEmails.map((email) => `<span class="lookup-value">${escapeHtml(email)}</span>`).join("")}
@@ -1981,7 +1986,7 @@ function indeedResultStatus(profile) {
       ${hometownMatch}
       ${resume}
       ${resumeStatus}
-      ${mobile ? `<button type="button" class="resume-link sms-inline" data-action="compose-sms" data-candidate-id="${Number(profile._candidateId)}" data-candidate-name="${escapeHtml(profile.name)}" data-phone="${escapeHtml(mobile.value)}">Send SMS</button>` : ""}
+      ${messagingPhone ? `<button type="button" class="resume-link sms-inline" data-action="compose-sms" data-candidate-id="${Number(profile._candidateId)}" data-candidate-name="${escapeHtml(profile.name)}" data-phone="${escapeHtml(messagingPhone.value)}">Send SMS</button>` : ""}
     </div>`;
   }
   if (result.status === "not_found") {
@@ -4051,7 +4056,7 @@ async function copyDraft() {
 }
 
 async function showSmsComposer(candidateId, candidateName, phone) {
-  if (!candidateId || !phone) throw new Error("A verified mobile number is required.");
+  if (!candidateId || !phone) throw new Error("A verified phone number is required.");
   const preview = await api("/candidates/" + Number(candidateId) + "/sms-preview?phone=" + encodeURIComponent(phone));
   if (preview.nexus_blocked) {
     const nexus = preview.nexus_eligibility || {};
@@ -4060,14 +4065,15 @@ async function showSmsComposer(candidateId, candidateName, phone) {
   }
   if (preview.opted_out) throw new Error("This number has opted out and cannot be messaged.");
   if (preview.already_contacted) throw new Error("This candidate has already received SMS outreach.");
-  activeSmsContext = { candidateId, candidateName, phone };
+  const selectedPhone = preview.phone || phone;
+  activeSmsContext = { candidateId, candidateName, phone: selectedPhone };
   const status = await api("/messaging/status");
   const canSend = Boolean(status.enabled && status.sender_configured);
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
       <span class="section-kicker">Zoom Phone</span>
       <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
-      <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
+      <p class="muted small">Selected phone: ${escapeHtml(selectedPhone)}</p>
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
       ${status.enabled && !status.sender_configured ? `<div class="notice error">Ask your Halo administrator to assign your Zoom Phone number before sending.</div>` : ""}
       ${!status.reply_notifications_configured ? `<div class="notice mt">Reply email notifications are not fully configured.</div>` : ""}
@@ -4111,30 +4117,30 @@ async function sendCandidateSms() {
 
 async function showBulkSmsComposer() {
   const selected = visibleCandidates.filter((candidate) => selectedSmsCandidates.has(Number(candidate.id)));
-  if (!selected.length) throw new Error("Select at least one candidate with a verified mobile number.");
+  if (!selected.length) throw new Error("Select at least one candidate with a verified phone number.");
   const status = await api("/messaging/status");
   if (!status.enabled) throw new Error("Zoom Phone SMS is not configured on the Medhunt server.");
   if (!status.sender_configured) throw new Error("Ask your Halo administrator to assign your Zoom Phone number before sending.");
   const entries = [];
   for (const candidate of selected) {
-    const mobile = publicPhoneContacts(candidate).find((item) => item.kind === "mobile")?.value || "";
-    if (!mobile) continue;
-    let preview = { phone: mobile, opted_out: false, already_contacted: false };
+    const candidatePhone = preferredMessagingPhone(candidate)?.value || "";
+    if (!candidatePhone) continue;
+    let preview = { phone: candidatePhone, opted_out: false, already_contacted: false };
     try {
-      preview = await api("/candidates/" + Number(candidate.id) + "/sms-preview?phone=" + encodeURIComponent(mobile));
+      preview = await api("/candidates/" + Number(candidate.id) + "/sms-preview?phone=" + encodeURIComponent(candidatePhone));
     } catch (error) {
-      preview = { phone: mobile, opted_out: true, already_contacted: false, error: error.message };
+      preview = { phone: candidatePhone, opted_out: true, already_contacted: false, error: error.message };
     }
     const firstName = String(candidate.name || "there").trim().split(/\s+/u)[0] || "there";
     entries.push({
       candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
-      phone: preview.phone || mobile,
+      phone: preview.phone || candidatePhone,
       message: "Hello " + firstName + ", This is Brian from Medhunt. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
       blocked: Boolean(preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
       reason: preview.error || (preview.nexus_blocked ? "Already active in Nexus" : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
     });
   }
-  if (!entries.length) throw new Error("The selected candidates have no verified mobile numbers.");
+  if (!entries.length) throw new Error("The selected candidates have no verified phone numbers.");
   activeSmsContext = { bulk: entries };
   const cards = entries.map((entry, index) =>
     '<div class="card bulk-sms-item"><div class="row spread"><strong>' + escapeHtml(entry.name) +

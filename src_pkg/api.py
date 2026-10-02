@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.35.0"
+APP_VERSION = "3.36.0"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -1457,17 +1457,12 @@ def enrich_batch(job_id: int | None = None):
 
 # ---- Zoom Phone SMS ----
 def _candidate_sms_phone(candidate: dict, supplied: str) -> str:
-    requested = store.contact_key(supplied)
     projected = contact_access.project_candidate(candidate)
-    mobile = [
-        str(item.get("value") or "").strip()
-        for item in projected.get("phone_contacts") or []
-        if str(item.get("kind") or "").casefold() == "mobile"
-    ]
-    match = next((value for value in mobile if store.contact_key(value) == requested), "")
-    if not match:
-        raise HTTPException(400, "Select a verified mobile number for this candidate.")
-    return match
+    selected = phone_policy.messaging_phone_detail(projected)
+    phone = str((selected or {}).get("value") or "").strip()
+    if not phone:
+        raise HTTPException(400, "No verified phone number is available for this candidate.")
+    return phone
 
 
 @app.get("/messaging/status")
