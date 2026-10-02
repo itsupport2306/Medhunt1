@@ -2444,7 +2444,10 @@ def nexus_delivery_summary(candidate_ids):
     """Return the latest durable Nexus outcome for each requested candidate."""
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     if not ordered_ids:
-        return {"selected": 0, "uploaded": 0, "pending": 0, "not_uploaded": 0, "items": []}
+        return {
+            "selected": 0, "uploaded": 0, "pending": 0,
+            "already_in_nexus": 0, "not_uploaded": 0, "items": [],
+        }
     placeholders = ",".join("?" for _ in ordered_ids)
     with _conn() as connection:
         candidates = {
@@ -2466,15 +2469,30 @@ def nexus_delivery_summary(candidate_ids):
                 WHERE candidate_id IN ({placeholders}) ORDER BY created,id""",
             ordered_ids,
         ).fetchall()
+        check_rows = connection.execute(
+            f"""SELECT candidate_id,result FROM nexus_candidate_checks
+                WHERE candidate_id IN ({placeholders})""",
+            ordered_ids,
+        ).fetchall()
     latest = {}
     for row in rows:
         latest[int(row["candidate_id"])] = dict(row)
+    blocked = set()
+    for row in check_rows:
+        try:
+            result = json.loads(row["result"] or "{}")
+        except (TypeError, ValueError):
+            result = {}
+        if result.get("blocked") is True and result.get("state") == "active_in_nexus":
+            blocked.add(int(row["candidate_id"]))
     pending_states = {"pending", "processing", "writing", "retry"}
     items = []
     for candidate_id in ordered_ids:
         delivery = latest.get(candidate_id)
         status = str((delivery or {}).get("status") or "").casefold()
-        if status == "succeeded":
+        if candidate_id in blocked:
+            group, reason = "already_in_nexus", "active_in_nexus"
+        elif status == "succeeded":
             group, reason = "uploaded", ""
         elif status in pending_states:
             group, reason = "pending", ""
@@ -2493,13 +2511,14 @@ def nexus_delivery_summary(candidate_ids):
         items.append({
             "candidate_id": candidate_id,
             "group": group,
-            "status": status or reason,
+            "status": reason if group == "already_in_nexus" else (status or reason),
             "reason": reason,
         })
     return {
         "selected": len(ordered_ids),
         "uploaded": sum(item["group"] == "uploaded" for item in items),
         "pending": sum(item["group"] == "pending" for item in items),
+        "already_in_nexus": sum(item["group"] == "already_in_nexus" for item in items),
         "not_uploaded": sum(item["group"] == "not_uploaded" for item in items),
         "enabled": bool(getattr(config, "NEXUS_SYNC_ENABLED", False)),
         "items": items,

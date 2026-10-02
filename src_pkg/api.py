@@ -59,7 +59,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.0"
+APP_VERSION = "3.36.1"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -943,6 +943,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
         config.NEXUS_SYNC_ENABLED
         and contactable.get("contacts_trusted") is True
         and (contactable.get("phones") or contactable.get("emails"))
+        and not nexus_eligibility.stored_result(candidate).get("blocked")
     )
     data, contact_sheet_embedded = resume_enrichment.add_contact_sheet(
         data, contact_sheet_candidate,

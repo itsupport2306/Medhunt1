@@ -9,6 +9,7 @@ import time
 from . import (
     config,
     contact_access,
+    nexus_eligibility,
     nexus_sync,
     phone_policy,
     resume_enrichment,
@@ -51,6 +52,8 @@ def queue_latest_resume_if_ready(candidate_id: int) -> dict | None:
     if not config.NEXUS_SYNC_ENABLED:
         return None
     candidate = store.get_candidate(int(candidate_id))
+    if nexus_eligibility.stored_result(candidate or {}).get("blocked"):
+        return None
     projected = contact_access.project_candidate(candidate)
     if not (
         projected.get("contacts_trusted") is True
@@ -181,6 +184,21 @@ def process_once() -> dict | None:
                 operation="local_storage",
                 code="local_record_missing",
             )
+        if nexus_eligibility.enabled():
+            try:
+                eligibility = nexus_eligibility.check_candidate(candidate, fresh=True)
+            except nexus_eligibility.NexusEligibilityUnavailable as exc:
+                raise nexus_sync.NexusRetryableError(
+                    "Nexus ownership verification is temporarily unavailable.",
+                    operation="eligibility_check",
+                    code="nexus_eligibility_unavailable",
+                ) from exc
+            if eligibility.get("blocked"):
+                raise nexus_sync.NexusPermanentError(
+                    "Candidate is already active in Nexus.",
+                    operation="eligibility_check",
+                    code="candidate_active_in_nexus",
+                )
         payload = _payload(delivery, candidate, resume)
         try:
             resume_pdf, _ = resume_enrichment.refresh_contact_sheet(
