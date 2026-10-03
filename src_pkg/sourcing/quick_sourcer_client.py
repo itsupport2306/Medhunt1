@@ -9,9 +9,9 @@ instantly.
 The API key is read only by this backend.  The browser extension calls the
 local ``/quick-sourcer/*`` endpoints and never receives or stores the key.
 
-Quick Sourcer contacts are saved against the candidate only after exact
-first/last name and current city/state checks. Database reads recheck that
-identity evidence before returning the stored contacts.
+Quick Sourcer's `found` result is authoritative for this provider. The backend
+normalizes returned contact fields and applies do-not-contact suppression, but
+does not discard a found response based on a second name or location check.
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import time
 
 import httpx
 
-from . import config, person_name, store, verification
+from . import config, person_name, store
 
 _PROVIDER = "quick_sourcer"
 _MASKED_EMAIL_RE = re.compile(r"\*")
@@ -133,7 +133,12 @@ def _phones(payload: dict, summary: dict) -> list[dict]:
     output, seen = [], set()
     profile = payload.get("profile") or {}
     rows = []
-    for collection in (summary.get("phones"), profile.get("phones"), payload.get("phones")):
+    for collection in (
+        summary.get("phones"), profile.get("phones"),
+        profile.get("currentPhone"), profile.get("current_phone"),
+        payload.get("phones"), payload.get("currentPhone"),
+        payload.get("current_phone"),
+    ):
         if isinstance(collection, list):
             rows.extend(collection)
         elif collection:
@@ -193,15 +198,25 @@ def _people(rows) -> list[dict]:
 
 def _current_address(payload: dict) -> dict:
     profile = payload.get("profile") or {}
-    current = profile.get("currentAddress")
+    current = (
+        profile.get("currentAddress") or profile.get("current_address")
+        or payload.get("currentAddress") or payload.get("current_address")
+    )
     if isinstance(current, dict):
-        return {
-            "address": _text(current.get("address")),
-            "county": _text(current.get("county")),
-            "date_range": _text(current.get("dateRange")),
-            "property_details": _text(current.get("propertyDetails")),
-        }
-    line = _text(current) or _text(payload.get("address"))
+        line = _text(
+            current.get("address") or current.get("value")
+            or current.get("formattedAddress") or current.get("formatted_address")
+        )
+        if line:
+            return {
+                "address": line,
+                "county": _text(current.get("county")),
+                "date_range": _text(current.get("dateRange") or current.get("date_range")),
+                "property_details": _text(
+                    current.get("propertyDetails") or current.get("property_details")
+                ),
+            }
+    line = (_text(current) if not isinstance(current, dict) else "") or _text(payload.get("address"))
     if not line:
         return {}
     return {"address": line, "county": "", "date_range": "", "property_details": ""}
@@ -214,8 +229,51 @@ def normalize(payload: dict | None) -> dict:
     in the richer per-site detail the panel shows underneath the contacts.
     """
     source_payload = payload if isinstance(payload, dict) else {}
-    if not source_payload.get("found"):
+    top_level_data = any(
+        source_payload.get(key)
+        for key in (
+            "name", "email", "phone", "address", "source", "profile",
+            "summary", "currentAddress", "current_address",
+        )
+    )
+    root_found = source_payload.get("found")
+    root_explicit_not_found = (
+        root_found is False or root_found == 0
+        or (isinstance(root_found, str) and root_found.strip().casefold()
+            in {"false", "0", "no", "not_found", "not found"})
+    )
+    if not top_level_data and not root_explicit_not_found:
+        for envelope in ("data", "result", "candidate", "record"):
+            nested = source_payload.get(envelope)
+            if isinstance(nested, dict):
+                source_payload = nested
+                break
+
+    has_record_data = any(
+        source_payload.get(key)
+        for key in (
+            "name", "email", "phone", "address", "source", "profile",
+            "summary", "currentAddress", "current_address",
+        )
+    )
+    raw_found = source_payload.get("found")
+    if isinstance(raw_found, str):
+        normalized_found = raw_found.strip().casefold()
+        provider_found = normalized_found in {"true", "1", "yes", "found"}
+        provider_not_found = normalized_found in {"false", "0", "no", "not_found", "not found"}
+    else:
+        provider_found = raw_found is True or raw_found == 1
+        provider_not_found = raw_found is False or raw_found == 0
+    # Some successful responses carry useful profile/contact fields while
+    # omitting `found` or returning it in a non-boolean form. Keep those
+    # records; only an explicit empty/not-found response becomes a miss.
+    if provider_not_found:
         return _empty("not_found")
+    if not provider_found and not has_record_data:
+        return _empty(
+            "error",
+            "Quick Sourcer response did not include a found result or record data.",
+        )
 
     summary = source_payload.get("summary") or {}
     profile = source_payload.get("profile") or {}
@@ -255,7 +313,10 @@ def normalize(payload: dict | None) -> dict:
     result = _empty("found")
     result.update({
         "external_id": source_payload.get("candidate_id"),
-        "name": _text(source_payload.get("name") or profile.get("fullName")),
+        "name": _text(
+            source_payload.get("name") or profile.get("fullName")
+            or next(iter(summary.get("names") or []), "")
+        ),
         "source": _text(source_payload.get("source")),
         "emails": emails,
         "masked_emails": masked[:20],
@@ -332,9 +393,6 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
             raise httpx.TransportError("Quick Sourcer returned no response.")
         if response.status_code in (401, 403):
             raise PermissionError("Quick Sourcer rejected the configured API key.")
-        if response.status_code == 404:
-            outcome = "completed"
-            return {"found": False}
         response.raise_for_status()
         body = response.json()
         outcome = "completed"
@@ -366,31 +424,6 @@ def _failure(exc: Exception, *, dedicated_ip: bool = False) -> dict:
     return _empty("error", f"Quick Sourcer request failed ({type(exc).__name__}).")
 
 
-def _is_person(result: dict, searched_name: str = "", searched_location: str = "") -> bool:
-    """Reject a "found" record that is page furniture rather than a person.
-
-    The upstream search answers with its single best guess and has no way to
-    say "nobody like that". A blocked or missing source page can therefore come
-    back as a record whose name is a nav label and whose only address is the
-    site's own error line. Require something contactable, and — when the caller
-    searched by name — require the answer to actually be about that name.
-    """
-    if result.get("status") != "found":
-        return False
-    if not (result.get("phones") or result.get("emails") or result.get("addresses")):
-        return False
-    if not searched_name:
-        return True
-    if not verification.name_evidence(searched_name, result.get("name") or "").get("exact"):
-        return False
-    expected_location = verification.us_city_state(searched_location)
-    current_address = (result.get("current_address") or {}).get("address") or ""
-    return bool(
-        expected_location
-        and verification.location_evidence(expected_location, [current_address]).get("exact")
-    )
-
-
 def find(name: str, location: str = "", candidate_id: int = 0,
          refresh: bool = False, dedicated_ip: bool | None = None) -> dict:
     """Search Quick Sourcer for one person, reusing a cached record by default."""
@@ -407,7 +440,7 @@ def find(name: str, location: str = "", candidate_id: int = 0,
     request_key = _request_key(person, location, use_dedicated)
     if not refresh:
         hit = _cached(request_key)
-        if hit and _is_person(hit, person, location):
+        if hit:
             return hit
     try:
         request_payload = {"name": person, "location": _text(location)}
@@ -417,8 +450,8 @@ def find(name: str, location: str = "", candidate_id: int = 0,
     except Exception as exc:
         return _failure(exc, dedicated_ip=use_dedicated)
     result = normalize(payload)
-    if not _is_person(result, person, location):
-        return _empty("not_found")
+    if result.get("status") != "found":
+        return result
     _remember(request_key, candidate_id, result)
     return result
 
@@ -436,20 +469,18 @@ def fetch(external_id: int, refresh: bool = False) -> dict:
     row = store.get_provider_lookup(_PROVIDER, request_key)
     candidate = store.get_candidate(int(row.get("candidate_id") or 0)) if row else None
     if not candidate:
-        return _empty("not_found")
-    expected_name = str(candidate.get("name") or candidate.get("canonical_name") or "")
-    expected_location = str(candidate.get("location") or "")
+        return _empty("error", "No saved Quick Sourcer record is linked to that id.")
     if not refresh:
         hit = _cached(request_key)
-        if hit and _is_person(hit, expected_name, expected_location):
+        if hit:
             return hit
     try:
         payload = _call("GET", f"/candidates/{identifier}")
     except Exception as exc:
         return _failure(exc)
     result = normalize(payload)
-    if not _is_person(result, expected_name, expected_location):
-        return _empty("not_found")
+    if result.get("status") != "found":
+        return result
     _remember(request_key, 0, result)
     return result
 
@@ -491,17 +522,24 @@ def public_lookup_result(result: dict | None) -> dict:
         ]
         emails = list(allowed.get("emails") or [])
         phones = [row["value"] for row in phone_contacts]
-        found = bool(emails or phones)
+        has_usable_contact = bool(emails or phones)
     else:
-        emails, phones, phone_contacts, found = [], [], [], False
+        emails, phones, phone_contacts, has_usable_contact = [], [], [], False
     return {
-        "status": "found" if found else ("failed" if status in ("error", "disabled") else "not_found"),
+        # The upstream `found` field determines match status. Contact
+        # suppression can remove a channel, but it must not rewrite a found
+        # API record into a no-match result.
+        "status": (
+            "found" if status == "found"
+            else "not_found" if status == "not_found"
+            else "failed"
+        ),
         "emails": emails,
         "phones": phones,
         "phone_contacts": phone_contacts,
         # A usable phone or email is sufficient for Indeed resume capture.
         # Masked provider email labels remain display-only/non-contact data.
-        "resume_required": bool(found and (emails or phones)),
+        "resume_required": bool(status == "found" and has_usable_contact),
         "location_match": None,
     }
 
@@ -526,12 +564,13 @@ def _stored_record(result: dict) -> dict:
 def apply_to_candidate(candidate_id: int, result: dict) -> dict:
     """Persist one Quick Sourcer record against a stored candidate."""
     public = public_lookup_result(result)
-    found = public["status"] == "found"
+    found = result.get("status") == "found"
+    has_usable_contact = bool(public["emails"] or public["phones"])
     now = time.time()
     expires = now + max(3600, config.QUICK_SOURCER_CACHE_TTL_SECONDS or 0)
     verification = {
         "source": CONTACT_SOURCE,
-        "identity_status": "exact_name_location" if found else "unverified",
+        "identity_status": "provider_found" if found else "unverified",
         "checked_at": now,
         "record": _stored_record(result) if result.get("status") == "found" else {},
         "evidence": {
@@ -552,8 +591,8 @@ def apply_to_candidate(candidate_id: int, result: dict) -> dict:
         ),
         identity_provider=CONTACT_SOURCE,
         verification=verification,
-        contact_verified_at=now if found else 0,
-        contact_expires_at=expires if found else 0,
+        contact_verified_at=now if has_usable_contact else 0,
+        contact_expires_at=expires if has_usable_contact else 0,
     )
     return public
 

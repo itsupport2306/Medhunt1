@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from . import config, store, trust_policy, verification
+from . import config, store, trust_policy
 
 
 def _public_record_projection(source: dict, projected: dict) -> dict:
@@ -14,25 +14,10 @@ def _public_record_projection(source: dict, projected: dict) -> dict:
     suppression still applies, because that is a compliance obligation rather
     than a confidence judgement.
     """
-    evidence = source.get("verification") or {}
-    record = evidence.get("record") or {}
-    current_address = (record.get("current_address") or {}).get("address") or ""
-    identity_ok = (
-        evidence.get("identity_status") == "exact_name_location"
-        and bool(verification.name_evidence(
-            source.get("name") or source.get("canonical_name") or "",
-            record.get("name") or "",
-        ).get("exact"))
-        and bool(verification.location_evidence(
-            source.get("location") or "", [current_address],
-        ).get("exact"))
-    )
-    if not identity_ok:
-        return projected
     phones = [str(value or "").strip() for value in source.get("phones") or []]
     reported = {
         str(item.get("value") or "").strip(): item
-        for item in ((source.get("verification") or {}).get("record") or {}).get("phones") or []
+        for item in (((source.get("verification") or {}).get("record") or {}).get("phones") or [])
         if isinstance(item, dict)
     }
     allowed = store.filter_dnc_groups({
@@ -57,8 +42,7 @@ def _public_record_projection(source: dict, projected: dict) -> dict:
             for value in allowed.get("phones") or []
         ],
         "addresses": list(allowed.get("addresses") or []),
-        # The administrator may explicitly designate the configured feed as a
-        # verified source for persistence and downstream Nexus delivery.
+        # The administrator controls whether the feed is trusted for ATS sync.
         "contacts_trusted": bool(config.QUICK_SOURCER_TRUSTED_FOR_SYNC),
         "contact_source": "quick_sourcer",
     })

@@ -146,7 +146,7 @@ def test_api_queues_a_preexisting_resume_after_quick_lookup(
     monkeypatch.setattr(
         api_module.nexus_delivery,
         "queue_latest_resume_if_ready",
-        lambda selected_id: calls.append(selected_id),
+        lambda selected_id, _user_id="local": calls.append(selected_id),
     )
 
     result = api_module.enrich_one(candidate_id)
@@ -257,12 +257,19 @@ def test_batch_isolates_lookup_and_nexus_queue_failures(
     monkeypatch.setattr(
         api_module.nexus_delivery,
         "queue_latest_resume_if_ready",
-        lambda _candidate_id: (_ for _ in ()).throw(RuntimeError("queue offline")),
+        lambda _candidate_id, _user_id="local": (_ for _ in ()).throw(RuntimeError("queue offline")),
+    )
+    monkeypatch.setattr(
+        api_module.ats_routing,
+        "check_after_enrichment",
+        lambda _candidate_id, destination, _user_id="local": {
+            "state": "clear", "blocked": False, "target": destination,
+        },
     )
 
     result = api_module._quick_sourcer_lookup_batch(api_module.ContactLookupBatchIn(
         candidate_ids=[first, second], run_id="linkedin-retry-run", confirmed=True,
-    ))
+    ), {"sub": "local", "delivery_targets": {"nexus": True}})
 
     assert result["results"][str(first)]["status"] == "failed"
     assert result["results"][str(second)]["status"] == "found"
@@ -270,7 +277,7 @@ def test_batch_isolates_lookup_and_nexus_queue_failures(
     assert result["matched"] == 1
 
 
-def test_scrape_artifacts_never_reach_a_candidate(quick_sourcer_enabled, monkeypatch):
+def test_provider_found_response_is_not_rejected_by_identity_checks(quick_sourcer_enabled, monkeypatch):
     _stub_api(monkeypatch, {
         "found": True,
         "candidate_id": 2321,
@@ -283,5 +290,5 @@ def test_scrape_artifacts_never_reach_a_candidate(quick_sourcer_enabled, monkeyp
 
     result = quick_sourcer_client.lookup_candidate(candidate_id)
 
-    assert result["status"] == "not_found"
+    assert result["status"] == "found"
     assert store.get_candidate(candidate_id)["addresses"] == []

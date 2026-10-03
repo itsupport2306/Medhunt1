@@ -1656,6 +1656,7 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict
                 "phone_contacts": [], "resume_required": False,
                 "location_match": None,
             }
+        lookup = results[str(candidate_id)]
         if (
             lookup.get("status") == "found"
             and lookup.get("ats_destination", "nexus") == "nexus"
