@@ -283,10 +283,9 @@ QUICK_SOURCER_TIMEOUT = max(10.0, float(os.getenv("QUICK_SOURCER_TIMEOUT", "150"
 CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER = max(
     1, min(10, int(os.getenv("CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER", "10"))),
 )
-# Hard cap across all Quick Sourcer lookup workers, even if Render still has
-# the previous value of 60 configured during rollout.
+# Hard cap across all Quick Sourcer lookup workers.
 CONTACT_LOOKUP_MAX_CONCURRENT = max(
-    1, min(50, int(os.getenv("CONTACT_LOOKUP_MAX_CONCURRENT", "50"))),
+    1, min(80, int(os.getenv("CONTACT_LOOKUP_MAX_CONCURRENT", "80"))),
 )
 QUICK_SOURCER_ENABLED = bool(
     QUICK_SOURCER_BASE_URL and QUICK_SOURCER_API_KEY
