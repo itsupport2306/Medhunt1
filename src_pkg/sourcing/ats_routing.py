@@ -1,10 +1,9 @@
 """Keep each Medhunt recruiter on exactly one assigned ATS workflow."""
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 
-from . import contact_access, healthboard_auth, nexus_eligibility, store
+from . import store
 
 
 def destination_for(identity: Mapping | None) -> str:
@@ -35,65 +34,14 @@ def stored(
     destination = str(
         routing.get("destination") or default_destination or "nexus"
     ).casefold()
-    if user_route:
-        eligibility = routing.get("eligibility") or {}
-    elif destination == "nexus":
-        eligibility = nexus_eligibility.stored_result(source)
-    else:
-        # ATS assignment results are user-specific; never reuse another
-        # recruiter's legacy candidate-level Ceipal status.
-        eligibility = {}
-    return {"destination": destination, "eligibility": dict(eligibility or {})}
-
-
-def _ceipal_payload(candidate: dict) -> dict:
-    projected = contact_access.project_candidate(candidate)
-    phones = [str(value).strip() for value in projected.get("phones") or [] if str(value).strip()]
-    wireless = []
-    for item in projected.get("phone_contacts") or []:
-        if not isinstance(item, Mapping):
-            continue
-        if str(item.get("kind") or "").casefold() in {
-            "mobile", "wireless", "cell", "cellular",
-        }:
-            value = str(item.get("value") or "").strip()
-            if value and value not in wireless:
-                wireless.append(value)
-    emails = [str(value).strip() for value in projected.get("emails") or [] if str(value).strip()]
-    return {
-        "name": str(candidate.get("name") or candidate.get("canonical_name") or "").strip(),
-        "location": str(candidate.get("location") or "").strip(),
-        "emails": list(dict.fromkeys(emails)),
-        "phones": list(dict.fromkeys(phones)),
-        "wireless_phones": wireless,
-    }
+    # Duplicate-presence checks against external ATSs are deliberately omitted.
+    # They were synchronous to contact lookup and added substantial latency.
+    # Candidate creation is sent directly to the assigned ATS; no remote
+    # duplicate query is part of this route.
+    return {"destination": destination, "eligibility": {}}
 
 
 def check_after_enrichment(candidate_id: int, destination: str, user_id: str = "") -> dict:
-    """Check the assigned ATS only after Quick Sourcer has saved contacts."""
+    """Compatibility shim: ATS duplicate checks are disabled in this flow."""
     target = "ceipal" if destination == "ceipal" else "nexus"
-    candidate = store.get_candidate(int(candidate_id)) or {}
-    existing_route = stored(candidate, user_id)
-    if (
-        target == "ceipal"
-        and existing_route.get("destination") == "ceipal"
-        and (existing_route.get("eligibility") or {}).get("state") == "created_in_ceipal"
-        and not (existing_route.get("eligibility") or {}).get("blocked")
-    ):
-        return dict(existing_route["eligibility"])
-    try:
-        if target == "ceipal":
-            result = healthboard_auth.medhunt_ceipal_candidate(
-                user_id=user_id, candidate=_ceipal_payload(candidate),
-            )
-        else:
-            result = nexus_eligibility.check_candidate(candidate, fresh=True)
-    except (nexus_eligibility.NexusEligibilityUnavailable, Exception) as exc:
-        message = "Ceipal check unavailable" if target == "ceipal" else "Nexus check unavailable"
-        logging.getLogger("medhunt.ats").warning(
-            "%s failed for candidate %s (%s).", target, candidate_id, type(exc).__name__,
-        )
-        result = {"state": "unavailable", "blocked": True, "checked": False, "error": message}
-    result = {**dict(result or {}), "target": target}
-    store.set_candidate_ats_route(candidate_id, user_id or "local", target, result)
-    return result
+    return {"state": "disabled", "blocked": False, "checked": False, "target": target}

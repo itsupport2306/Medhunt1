@@ -87,24 +87,8 @@ def process_once() -> dict | None:
         user_id = str(job.get("requested_by") or "")
         ats_routing.set_candidate_target(candidate_id, destination, user_id)
         if result.get("status") == "found":
-            eligibility = ats_routing.check_after_enrichment(
-                candidate_id, destination, user_id,
-            )
-            if eligibility.get("blocked"):
-                return _terminal(job, "blocked", {
-                    "status": "blocked", "emails": [], "phones": [],
-                    "phone_contacts": [], "resume_required": False,
-                    "location_match": None,
-                    "ats_destination": destination,
-                    "ats_eligibility": eligibility,
-                    "nexus_eligibility": eligibility if destination == "nexus" else {},
-                })
-            result.update({
-                "ats_destination": destination,
-                "ats_eligibility": eligibility,
-            })
+            result["ats_destination"] = destination
             if destination == "nexus":
-                result["nexus_eligibility"] = eligibility
                 try:
                     nexus_delivery.queue_latest_resume_if_ready(candidate_id, user_id)
                 except Exception as exc:

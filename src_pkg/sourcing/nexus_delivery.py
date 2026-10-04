@@ -10,7 +10,6 @@ from . import (
     ats_routing,
     config,
     contact_access,
-    nexus_eligibility,
     nexus_sync,
     phone_policy,
     resume_enrichment,
@@ -55,8 +54,6 @@ def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> d
     candidate = store.get_candidate(int(candidate_id))
     route = ats_routing.stored(candidate or {}, user_id)
     if route.get("destination") != "nexus":
-        return None
-    if nexus_eligibility.stored_result(candidate or {}).get("blocked"):
         return None
     projected = contact_access.project_candidate(candidate)
     if not (
@@ -198,21 +195,6 @@ def process_once() -> dict | None:
                 operation="ats_routing",
                 code="candidate_assigned_to_ceipal",
             )
-        if nexus_eligibility.enabled():
-            try:
-                eligibility = nexus_eligibility.check_candidate(candidate, fresh=True)
-            except nexus_eligibility.NexusEligibilityUnavailable as exc:
-                raise nexus_sync.NexusRetryableError(
-                    "Nexus ownership verification is temporarily unavailable.",
-                    operation="eligibility_check",
-                    code="nexus_eligibility_unavailable",
-                ) from exc
-            if eligibility.get("blocked"):
-                raise nexus_sync.NexusPermanentError(
-                    "Candidate is already active in Nexus.",
-                    operation="eligibility_check",
-                    code="candidate_active_in_nexus",
-                )
         payload = _payload(delivery, candidate, resume)
         try:
             resume_pdf, _ = resume_enrichment.refresh_contact_sheet(

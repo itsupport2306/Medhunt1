@@ -109,7 +109,7 @@ def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
 
 
 def medhunt_ceipal_candidate(*, user_id: str, candidate: dict) -> dict:
-    """Ask Halo to check and create this Ceipal-assigned candidate.
+    """Ask Halo to upload this Ceipal-assigned candidate directly.
 
     Ceipal secrets stay in Halo's server environment; Medhunt sends only the
     enriched candidate fields and the authenticated Halo user id.
@@ -128,10 +128,10 @@ def medhunt_ceipal_candidate(*, user_id: str, candidate: dict) -> dict:
             detail = str(response.json().get("detail") or "")
         except ValueError:
             detail = ""
-        raise RuntimeError(detail or f"Halo Ceipal check returned HTTP {response.status_code}.")
+        raise RuntimeError(detail or f"Halo Ceipal upload returned HTTP {response.status_code}.")
     payload = response.json()
     if not isinstance(payload, dict):
-        raise RuntimeError("Halo Ceipal check returned an invalid response.")
+        raise RuntimeError("Halo Ceipal upload returned an invalid response.")
     return payload
 
 

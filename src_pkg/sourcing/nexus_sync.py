@@ -1,4 +1,4 @@
-"""Private, idempotency-aware delivery of trusted candidates to Nexus.
+"""Private, idempotency-aware delivery of candidates and resumes to Nexus.
 
 The browser extension must never know Nexus credentials or tenant routing IDs.
 This module therefore accepts only the backend's already-sanitized candidate
@@ -7,12 +7,10 @@ evidence, and API credentials are deliberately excluded from every outbound
 candidate payload and from public exception messages.
 
 ``process_delivery`` is synchronous so a durable outbox worker can decide when
-to acknowledge, retry, or send a delivery for manual review.  It performs two
-independent duplicate searches (exact email and exact phone) before any write:
-
-* no remote match -> create the candidate with the resume;
-* one consistent remote candidate -> upload the resume to that candidate;
-* multiple or conflicting matches -> stop for manual review.
+to acknowledge, retry, or send a delivery for manual review. It creates a
+candidate directly through the configured Nexus insert endpoint when there is
+no saved Nexus link, then uploads the resume. Existing saved links are reused.
+It does not search Nexus for duplicate candidates.
 """
 from __future__ import annotations
 
@@ -1543,45 +1541,9 @@ def process_delivery(
             "checksum_sha256": checksum,
         }
 
-    # Always query both identifiers independently. Stopping after the first hit
-    # can silently attach a resume to the wrong person when stale contacts were
-    # re-used on two different Nexus records.
-    email_rows = (
-        client.search_candidates(email=identity["email"])
-        if identity["email"]
-        else []
-    )
-    phone_rows = (
-        client.search_candidates(phone=identity["phone"])
-        if identity["phone"]
-        else []
-    )
-    candidate_id, matched_by = _resolve_duplicate(
-        email_rows,
-        phone_rows,
-        expected_name=f"{identity['firstName']} {identity['lastName']}",
-    )
-
-    if candidate_id is not None:
-        doc_type_id = _resume_doc_type_id(client)
-        if before_write:
-            before_write("resume_upload")
-        client.upload_resume(
-            candidate_id,
-            doc_type_id=doc_type_id,
-            filename=filename,
-            content=resume_pdf,
-            checksum=checksum,
-        )
-        return {
-            "status": "delivered",
-            "action": "resume_uploaded",
-            "nexus_candidate_id": candidate_id,
-            "matched_by": matched_by,
-            "resume_id": resume_id,
-            "checksum_sha256": checksum,
-        }
-
+    # No ATS duplicate lookup is performed. If this local candidate already
+    # has a stored Nexus link, the resume is attached above; otherwise submit
+    # the candidate directly; any duplicate handling is left to Nexus.
     profile = _build_profile(client, identity, settings.default_profile)
     if before_write:
         before_write("candidate_creation")

@@ -34,7 +34,7 @@ from sourcing import (
     resume_enrichment, contact_access,
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
-    profile_resume, zoom_sms, nexus_eligibility,
+    profile_resume, zoom_sms,
     contact_lookup_queue, ats_routing,
 )
 
@@ -477,9 +477,6 @@ def _public_candidate(candidate: dict | None, actor: dict | None = None) -> dict
         str(identity.get("sub") or "local"),
         ats_routing.destination_for(identity),
     )
-    eligibility = ats.get("eligibility") or {}
-    if eligibility.get("blocked"):
-        projected = {**projected, "emails": [], "phones": [], "phone_contacts": []}
     allowed = (
         "id", "name", "location", "job_id", "stage", "fit_score",
         "emails", "phones", "phone_contacts", "addresses", "enrich_status",
@@ -490,9 +487,10 @@ def _public_candidate(candidate: dict | None, actor: dict | None = None) -> dict
         str(projected.get("contact_source") or "") == "quick_sourcer"
     )
     public["ats_destination"] = ats.get("destination") or "nexus"
-    public["ats_eligibility"] = eligibility
-    # Retain the old field for already-shipped extension builds.
-    public["nexus_eligibility"] = eligibility if public["ats_destination"] == "nexus" else {}
+    # Keep fields for older extension builds, but no longer expose external ATS
+    # duplicate checks or block contact visibility based on their results.
+    public["ats_eligibility"] = {}
+    public["nexus_eligibility"] = {}
     return public
 
 
@@ -591,8 +589,6 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
         for candidate_id in dict.fromkeys(body.candidate_ids):
             candidate = store.get_candidate(candidate_id)
             if not candidate:
-                continue
-            if nexus_eligibility.stored_result(candidate).get("blocked"):
                 continue
             projected = contact_access.project_candidate(candidate)
             if (
@@ -1138,6 +1134,51 @@ def create_campaign(body: CampaignCreateIn):
         raise HTTPException(400, str(exc))
 
 
+def _upload_ceipal_candidate(candidate_id: int, user_id: str) -> str:
+    """Send a Ceipal-assigned candidate to Halo once, without a remote lookup."""
+    candidate = store.get_candidate(candidate_id)
+    if not candidate:
+        return "failed"
+    route = store.get_candidate_ats_route(candidate_id, user_id) or {}
+    eligibility = route.get("eligibility") or {}
+    previous = eligibility.get("ceipal_upload") or {}
+    if previous.get("state") == "uploaded_to_ceipal":
+        return "uploaded"
+
+    projected = contact_access.project_candidate(candidate)
+    wireless_phones = [
+        str(item.get("value") or "").strip()
+        for item in projected.get("phone_contacts") or []
+        if isinstance(item, dict)
+        and str(item.get("kind") or "").casefold() in {"wireless", "mobile"}
+    ]
+    payload = {
+        "name": str(candidate.get("canonical_name") or candidate.get("name") or "").strip(),
+        "location": str(candidate.get("location") or "").strip(),
+        "emails": list(projected.get("emails") or []),
+        "phones": list(projected.get("phones") or []),
+        "wireless_phones": list(dict.fromkeys(wireless_phones)),
+    }
+    try:
+        result = healthboard_auth.medhunt_ceipal_candidate(
+            user_id=str(user_id or ""), candidate=payload,
+        )
+        state = str(result.get("state") or "uploaded_to_ceipal")
+        eligibility["ceipal_upload"] = {
+            "state": state,
+            "applicant_id": str(result.get("applicant_id") or ""),
+            "checked": False,
+        }
+        store.set_candidate_ats_route(candidate_id, user_id, "ceipal", eligibility)
+        return "uploaded" if state == "uploaded_to_ceipal" else state
+    except Exception as exc:
+        logging.getLogger("medhunt.ceipal").warning(
+            "Ceipal upload deferred for candidate %s (%s).",
+            candidate_id, type(exc).__name__,
+        )
+        return "failed"
+
+
 def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "local"):
     candidate = store.get_candidate(cid)
     if not candidate:
@@ -1156,12 +1197,12 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
         if not str(contact_sheet_candidate.get("location") or "").strip():
             contact_sheet_candidate["location"] = accepted_resume_fields.get("location") or ""
     destination = ats_routing.stored(candidate, user_id).get("destination") or "nexus"
+    ceipal_sync_status = "disabled"
     nexus_contact_ready = bool(
         destination == "nexus"
         and config.NEXUS_SYNC_ENABLED
         and contactable.get("contacts_trusted") is True
         and (contactable.get("phones") or contactable.get("emails"))
-        and not nexus_eligibility.stored_result(candidate).get("blocked")
     )
     data, contact_sheet_embedded = resume_enrichment.add_contact_sheet(
         data, contact_sheet_candidate,
@@ -1187,11 +1228,14 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
             )
             if queue_nexus else None
         )
+        if destination == "ceipal":
+            ceipal_sync_status = _upload_ceipal_candidate(cid, user_id)
         return {
             **existing,
             "contact_sheet_embedded": contact_sheet_embedded,
             "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
             "deduplicated": True,
+            "ceipal_sync_status": ceipal_sync_status,
             "nexus_sync_status": (
                 nexus_delivery.get("status") if nexus_delivery else nexus_skip_status
             ),
@@ -1218,10 +1262,13 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
             requested_by=user_id,
             extraction=extraction,
         )
+    if destination == "ceipal":
+        ceipal_sync_status = _upload_ceipal_candidate(cid, user_id)
     result = {
         **resume,
         "contact_sheet_embedded": contact_sheet_embedded,
         "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
+        "ceipal_sync_status": ceipal_sync_status,
     }
     if not queue_nexus:
         result["nexus_sync_status"] = nexus_skip_status
@@ -1331,48 +1378,12 @@ def get_resume(cid: int, resume_id: int):
     )
 
 # ---- enrichment ----
-def _nexus_blocked_lookup(eligibility: dict) -> dict:
-    return {
-        "status": "blocked", "emails": [], "phones": [], "phone_contacts": [],
-        "addresses": [], "resume_required": False, "location_match": None,
-        "nexus_eligibility": eligibility,
-    }
-
-
-def _ats_blocked_lookup(eligibility: dict) -> dict:
-    return {
-        "status": "blocked", "emails": [], "phones": [], "phone_contacts": [],
-        "addresses": [], "resume_required": False, "location_match": None,
-        "ats_destination": eligibility.get("target") or "nexus",
-        "ats_eligibility": eligibility,
-        "nexus_eligibility": eligibility if eligibility.get("target") == "nexus" else {},
-    }
-
-
 def _route_enriched_lookup(candidate_id: int, lookup: dict, actor: dict) -> dict:
     destination = ats_routing.destination_for(actor)
     user_id = str(actor.get("sub") or "local")
     ats_routing.set_candidate_target(candidate_id, destination, user_id)
     result = dict(lookup or {})
-    if result.get("status") != "found":
-        return {**result, "ats_destination": destination}
-    eligibility = ats_routing.check_after_enrichment(candidate_id, destination, user_id)
-    if eligibility.get("blocked"):
-        return _ats_blocked_lookup(eligibility)
-    result.update({
-        "ats_destination": destination,
-        "ats_eligibility": eligibility,
-    })
-    if destination == "nexus":
-        result["nexus_eligibility"] = eligibility
-    return result
-
-
-def _check_nexus_candidate(candidate: dict, *, fresh: bool = False) -> dict:
-    try:
-        return nexus_eligibility.check_candidate(candidate, fresh=fresh)
-    except nexus_eligibility.NexusEligibilityUnavailable as exc:
-        raise HTTPException(503, str(exc)) from exc
+    return {**result, "ats_destination": destination}
 
 
 def _quick_sourcer_selected() -> bool:
@@ -1660,7 +1671,6 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict
         if (
             lookup.get("status") == "found"
             and lookup.get("ats_destination", "nexus") == "nexus"
-            and not (lookup.get("ats_eligibility") or {}).get("blocked")
         ):
             try:
                 nexus_delivery.queue_latest_resume_if_ready(
@@ -1783,24 +1793,10 @@ def _resolve_zoom_sms_sender(request: Request, *, strict: bool) -> dict | None:
 
 @app.get("/candidates/{candidate_id}/sms-preview")
 def sms_preview(candidate_id: int, phone: str, request: Request):
-    actor = _request_user(request)
+    _request_user(request)
     candidate = store.get_candidate(candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
-    destination = ats_routing.destination_for(actor)
-    user_id = str(actor.get("sub") or "local")
-    stored_route = ats_routing.stored(candidate, user_id)
-    eligibility = stored_route.get("eligibility") or {}
-    if stored_route.get("destination") != destination or not eligibility:
-        raise HTTPException(409, "Enrich this candidate through your assigned ATS before messaging.")
-    if eligibility.get("blocked"):
-        return {
-            "phone": phone, "opted_out": False, "already_contacted": False,
-            "ats_blocked": True, "ats_destination": destination,
-            "ats_eligibility": eligibility,
-            "nexus_blocked": destination == "nexus",
-            "nexus_eligibility": eligibility if destination == "nexus" else {},
-        }
     verified_phone = _candidate_sms_phone(candidate, phone)
     return {
         "phone": verified_phone,
@@ -1823,19 +1819,6 @@ def send_sms(body: SmsSendIn, request: Request):
     candidate = store.get_candidate(body.candidate_id)
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
-    destination = ats_routing.destination_for(user)
-    user_id = str(user.get("sub") or "local")
-    stored_route = ats_routing.stored(candidate, user_id)
-    eligibility = stored_route.get("eligibility") or {}
-    if stored_route.get("destination") != destination or not eligibility:
-        raise HTTPException(409, "Enrich this candidate through your assigned ATS before messaging.")
-    if eligibility.get("blocked"):
-        ats_name = "Ceipal" if destination == "ceipal" else "Nexus"
-        owner = str(eligibility.get("recruiter") or "another recruiter")
-        status = str(eligibility.get("status") or "already present")
-        raise HTTPException(
-            409, f"This candidate is already {status} in {ats_name} under {owner}.",
-        )
     phone = _candidate_sms_phone(candidate, body.phone)
     if store.is_dnc(phone):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
