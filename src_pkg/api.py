@@ -606,10 +606,12 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
     actor = _request_user(request)
     if not body.confirmed:
         raise HTTPException(400, "Confirm the selected candidates before queueing lookup.")
+    user_id = str(actor.get("sub") or "local")
     try:
         items = store.enqueue_contact_lookup_jobs(
-            body.run_id, body.candidate_ids, str(actor.get("sub") or "local"),
+            body.run_id, body.candidate_ids, user_id,
             delivery_target=ats_routing.destination_for(actor),
+            per_user_limit=healthboard_auth.medhunt_contact_lookup_limit(user_id),
         )
     except store.ContactLookupQueueLimitError as exc:
         raise HTTPException(
@@ -624,7 +626,10 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
 @app.get("/contact-lookup/queue/control")
 def contact_lookup_queue_control(request: Request):
     actor = _request_user(request)
-    limit = store.contact_lookup_user_limit()
+    user_id = str(actor.get("sub") or "local")
+    limit = store.contact_lookup_user_limit(
+        limit_override=healthboard_auth.medhunt_contact_lookup_limit(user_id),
+    )
     return {
         "paused": store.contact_lookup_paused(str(actor.get("sub") or "local")),
         "selection_limit": limit,
@@ -639,7 +644,11 @@ def update_contact_lookup_queue_control(body: ContactLookupControlIn, request: R
     result = store.set_contact_lookup_paused(
         str(actor.get("sub") or "local"), body.paused,
     )
-    result["selection_limit"] = store.contact_lookup_user_limit()
+    result["selection_limit"] = store.contact_lookup_user_limit(
+        limit_override=healthboard_auth.medhunt_contact_lookup_limit(
+            str(actor.get("sub") or "local"),
+        ),
+    )
     result["limit_timezone"] = "America/Los_Angeles"
     result["unlimited_after"] = "16:00"
     return result

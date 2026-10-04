@@ -281,7 +281,7 @@ QUICK_SOURCER_BASE_URL = os.getenv(
 QUICK_SOURCER_API_KEY = os.getenv("QUICK_SOURCER_API_KEY", "").strip()
 QUICK_SOURCER_TIMEOUT = max(10.0, float(os.getenv("QUICK_SOURCER_TIMEOUT", "150")))
 CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER = max(
-    1, min(10, int(os.getenv("CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER", "10"))),
+    1, min(80, int(os.getenv("CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER", "10"))),
 )
 # Hard cap across all Quick Sourcer lookup workers.
 CONTACT_LOOKUP_MAX_CONCURRENT = max(

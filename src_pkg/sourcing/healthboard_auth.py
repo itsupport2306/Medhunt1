@@ -11,6 +11,7 @@ from . import config
 
 _CACHE_LOCK = threading.Lock()
 _USER_CACHE: dict[str, tuple[float, dict]] = {}
+_LOOKUP_LIMIT_CACHE: dict[str, tuple[float, int]] = {}
 
 
 def enabled() -> bool:
@@ -133,6 +134,37 @@ def medhunt_ceipal_candidate(*, user_id: str, candidate: dict) -> dict:
     if not isinstance(payload, dict):
         raise RuntimeError("Halo Ceipal upload returned an invalid response.")
     return payload
+
+
+def medhunt_contact_lookup_limit(user_id: str) -> int | None:
+    """Read the recruiter organization's Quick Sourcer outstanding limit."""
+    owner = str(user_id or "").strip()
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not owner or not enabled() or not token:
+        return None
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _LOOKUP_LIMIT_CACHE.get(owner)
+        if cached and cached[0] > now:
+            return cached[1]
+    try:
+        response = httpx.post(
+            _url("/api/extension/medhunt/contact-lookup-limit"),
+            headers={"X-Medhunt-Service-Token": token},
+            json={"user_id": owner},
+            timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+        )
+        response.raise_for_status()
+        limit = int(response.json().get("per_user_limit"))
+        if not 1 <= limit <= 80:
+            return None
+    except (httpx.HTTPError, TypeError, ValueError):
+        with _CACHE_LOCK:
+            cached = _LOOKUP_LIMIT_CACHE.get(owner)
+            return cached[1] if cached else None
+    with _CACHE_LOCK:
+        _LOOKUP_LIMIT_CACHE[owner] = (now + 60, limit)
+    return limit
 
 
 def list_recruiters(token: str) -> list[dict]:

@@ -2708,8 +2708,10 @@ class ContactLookupQueueLimitError(ValueError):
         )
 
 
-def contact_lookup_user_limit(now: datetime | None = None) -> int | None:
-    """Return the user's active queue limit; no per-user cap after 4 PM Pacific."""
+def contact_lookup_user_limit(
+    now: datetime | None = None, limit_override: int | None = None,
+) -> int | None:
+    """Return the configured user limit; no per-user cap after 4 PM Pacific."""
     pacific_now = (now or datetime.now(ZoneInfo("America/Los_Angeles")))
     if pacific_now.tzinfo is None:
         pacific_now = pacific_now.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
@@ -2717,17 +2719,22 @@ def contact_lookup_user_limit(now: datetime | None = None) -> int | None:
         pacific_now = pacific_now.astimezone(ZoneInfo("America/Los_Angeles"))
     if pacific_now.hour >= 16:
         return None
-    return int(config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER)
+    limit = (
+        config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER
+        if limit_override is None else int(limit_override)
+    )
+    return max(1, min(80, int(limit)))
 
 
 def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "",
-                                delivery_target: str = "nexus") -> list[dict]:
+                                delivery_target: str = "nexus",
+                                per_user_limit: int | None = None) -> list[dict]:
     now = time.time()
     normalized_run = str(run_id or "").strip()
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     owner = str(requested_by or "")[:200]
     target = "ceipal" if str(delivery_target or "").casefold() == "ceipal" else "nexus"
-    limit = contact_lookup_user_limit()
+    limit = contact_lookup_user_limit(limit_override=per_user_limit)
     with _CONTACT_LOOKUP_ENQUEUE_LOCK:
         with _conn() as connection:
             if connection.postgres:
