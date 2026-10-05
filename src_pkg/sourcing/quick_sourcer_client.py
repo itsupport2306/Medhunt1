@@ -20,7 +20,7 @@ import time
 
 import httpx
 
-from . import config, person_name, store
+from . import config, contact_access, person_name, store
 
 _PROVIDER = "quick_sourcer"
 _MASKED_EMAIL_RE = re.compile(r"\*")
@@ -598,15 +598,35 @@ def apply_to_candidate(candidate_id: int, result: dict) -> dict:
 
 
 def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
-    """Look one stored candidate up through Quick Sourcer and save the answer.
+    """Reuse trusted saved contacts, or look the candidate up through Quick Sourcer.
 
     An uncached search takes 30-90 seconds because the API drives a real
     browser, so callers must run these one at a time rather than in parallel.
+    Fresh, trusted contacts already saved for this exact candidate are returned
+    directly without spending a Quick Sourcer request. Quick Sourcer contacts
+    themselves continue to use the provider lookup cache and its TTL.
     """
     candidate = store.get_candidate(candidate_id)
     if not candidate:
         return {"status": "failed", "emails": [], "phones": [], "phone_contacts": [],
                 "resume_required": False, "location_match": None}
+
+    verification = candidate.get("verification") or {}
+    if not refresh and verification.get("source") != CONTACT_SOURCE:
+        saved = contact_access.project_candidate(candidate)
+        if saved.get("contacts_trusted") and (saved.get("emails") or saved.get("phones")):
+            return {
+                "status": "found",
+                "cached": True,
+                "source": str(saved.get("contact_source") or "saved_contact"),
+                "emails": list(saved.get("emails") or []),
+                "phones": list(saved.get("phones") or []),
+                "phone_contacts": list(saved.get("phone_contacts") or []),
+                "addresses": list(saved.get("addresses") or []),
+                "resume_required": True,
+                "location_match": None,
+            }
+
     name = person_name.normalize_person_name(candidate.get("name") or "") or str(
         candidate.get("name") or ""
     )

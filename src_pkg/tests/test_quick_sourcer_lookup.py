@@ -155,6 +155,48 @@ def test_api_queues_a_preexisting_resume_after_quick_lookup(
     assert calls == [candidate_id]
 
 
+def test_fresh_trusted_saved_contacts_skip_quick_sourcer(
+    quick_sourcer_enabled, monkeypatch,
+):
+    candidate_id = _candidate()
+    monkeypatch.setattr(contact_access, "project_candidate", lambda candidate: {
+        **candidate,
+        "emails": ["joseph@example.test"],
+        "phones": ["(610) 217-3807"],
+        "phone_contacts": [{"value": "(610) 217-3807", "kind": "mobile"}],
+        "addresses": ["Nazareth, PA"],
+        "contacts_trusted": True,
+    })
+    monkeypatch.setattr(
+        quick_sourcer_client, "find",
+        lambda *args, **kwargs: pytest.fail("saved contacts should skip Quick Sourcer"),
+    )
+
+    result = quick_sourcer_client.lookup_candidate(candidate_id)
+
+    assert result == {
+        "status": "found", "cached": True, "source": "saved_contact",
+        "emails": ["joseph@example.test"], "phones": ["(610) 217-3807"],
+        "phone_contacts": [{"value": "(610) 217-3807", "kind": "mobile"}],
+        "addresses": ["Nazareth, PA"], "resume_required": True,
+        "location_match": None,
+    }
+
+
+def test_refresh_bypasses_saved_contact_shortcut(quick_sourcer_enabled, monkeypatch):
+    candidate_id = _candidate()
+    monkeypatch.setattr(contact_access, "project_candidate", lambda candidate: {
+        **candidate, "emails": ["joseph@example.test"], "phones": [],
+        "phone_contacts": [], "addresses": [], "contacts_trusted": True,
+    })
+    calls = _stub_api(monkeypatch, {"found": False})
+
+    result = quick_sourcer_client.lookup_candidate(candidate_id, refresh=True)
+
+    assert result["status"] == "not_found"
+    assert calls and calls[0][1] == "/find"
+
+
 def test_do_not_contact_entries_are_still_suppressed(quick_sourcer_enabled, monkeypatch):
     _stub_api(monkeypatch, FOUND_PAYLOAD)
     candidate_id = _candidate()
