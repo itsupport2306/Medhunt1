@@ -17,8 +17,7 @@ def destination_for(identity: Mapping | None) -> str:
 
 
 def set_candidate_target(candidate_id: int, destination: str, user_id: str = "") -> None:
-    if not store.get_candidate(int(candidate_id)):
-        return
+    """Persist the route for a candidate already validated by its caller."""
     owner = str(user_id or "local")
     store.set_candidate_ats_route(candidate_id, owner, destination)
 

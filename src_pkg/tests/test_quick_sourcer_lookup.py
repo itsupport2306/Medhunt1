@@ -197,6 +197,28 @@ def test_refresh_bypasses_saved_contact_shortcut(quick_sourcer_enabled, monkeypa
     assert calls and calls[0][1] == "/find"
 
 
+def test_retry_keeps_fifo_priority_over_new_queue_jobs(
+    quick_sourcer_enabled, monkeypatch,
+):
+    monkeypatch.setattr(config, "CONTACT_LOOKUP_MAX_CONCURRENT", 1)
+    first = _candidate("First Nurse", "Austin, Texas")
+    second = store.add_candidate(
+        "Second Nurse", "Dallas, Texas", source="indeed", source_id="second",
+    )
+    store.enqueue_contact_lookup_jobs("first-run", [first], "user-one")
+    claimed = store.claim_contact_lookup_job()
+    store.finish_contact_lookup_job(
+        claimed["id"], "retry", {}, retry_at=quick_sourcer_client.time.time() - 1,
+    )
+    before = store.list_contact_lookup_jobs("first-run", [first], "user-one")
+    store.enqueue_contact_lookup_jobs("second-run", [second], "user-two")
+    after = store.list_contact_lookup_jobs("first-run", [first], "user-one")
+
+    assert before["items"][0]["position"] == 0
+    assert after["items"][0]["position"] == 0
+    assert store.claim_contact_lookup_job()["candidate_id"] == first
+
+
 def test_do_not_contact_entries_are_still_suppressed(quick_sourcer_enabled, monkeypatch):
     _stub_api(monkeypatch, FOUND_PAYLOAD)
     candidate_id = _candidate()

@@ -80,24 +80,31 @@ def process_once() -> dict | None:
             "location_match": None,
         })
     try:
-        result = quick_sourcer_client.lookup_candidate(candidate_id)
+        result = quick_sourcer_client.lookup_candidate(
+            candidate_id, candidate=candidate,
+        )
         if result.get("status") == "failed":
             return _retry(job, "temporary_lookup_failure")
         destination = "ceipal" if str(job.get("delivery_target") or "nexus").casefold() == "ceipal" else "nexus"
         user_id = str(job.get("requested_by") or "")
         ats_routing.set_candidate_target(candidate_id, destination, user_id)
-        if result.get("status") == "found":
+        found = result.get("status") == "found"
+        if found:
             result["ats_destination"] = destination
-            if destination == "nexus":
-                try:
-                    nexus_delivery.queue_latest_resume_if_ready(candidate_id, user_id)
-                except Exception as exc:
-                    logging.getLogger("medhunt.nexus").warning(
-                        "Nexus queueing deferred for candidate %s (%s).",
-                        candidate_id, type(exc).__name__,
-                    )
         status = "succeeded" if result.get("status") == "found" else "not_found"
-        return _terminal(job, status, result)
+        terminal = _terminal(job, status, result)
+        # Make the contact result visible to the extension before doing
+        # optional ATS work. A newly enriched candidate normally has no resume
+        # yet, and resume capture will queue delivery when it is saved.
+        if found and destination == "nexus":
+            try:
+                nexus_delivery.queue_latest_resume_if_ready(candidate_id, user_id)
+            except Exception as exc:
+                logging.getLogger("medhunt.nexus").warning(
+                    "Nexus queueing deferred for candidate %s (%s).",
+                    candidate_id, type(exc).__name__,
+                )
+        return terminal
     except Exception as exc:
         logging.getLogger("medhunt.lookup").warning(
             "Queued candidate lookup failed for id %s (%s).",

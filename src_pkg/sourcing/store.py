@@ -462,8 +462,8 @@ _POSTGRES_SCHEMA_READY = False
 _SCHEMA_LOCK = threading.Lock()
 _CONTACT_LOOKUP_ENQUEUE_LOCK = threading.Lock()
 _CONTACT_LOOKUP_CLAIM_LOCK = threading.Lock()
-_POSTGRES_CONNECTION = None
-_POSTGRES_CONNECTION_LOCK = threading.RLock()
+_POSTGRES_POOL = None
+_POSTGRES_POOL_LOCK = threading.Lock()
 _CANDIDATE_FIELDS = {
     "name", "location", "hometown", "job_id", "stage", "fit_score", "phones", "emails",
     "addresses", "enrich_status", "confidence", "notes", "source",
@@ -612,38 +612,45 @@ def _postgres_schema_is_current(connection):
 @contextmanager
 def _conn():
     if config.DATABASE_URL:
-        global _POSTGRES_CONNECTION
+        global _POSTGRES_POOL
         try:
-            import psycopg
             from psycopg.rows import dict_row
+            from psycopg_pool import ConnectionPool
         except ImportError as exc:  # pragma: no cover - dependency error is explicit
             raise RuntimeError(
-                "DATABASE_URL is configured but psycopg is not installed. "
+                "DATABASE_URL is configured but PostgreSQL support is not installed. "
                 "Run: pip install -r requirements.txt"
             ) from exc
 
-        # This is a local single-user service. Reusing one guarded PostgreSQL
-        # connection avoids a fresh TLS/Neon handshake for every cache, DNC,
-        # candidate, and update operation in one PDL lookup.
-        with _POSTGRES_CONNECTION_LOCK:
-            raw = _POSTGRES_CONNECTION
-            if raw is None or raw.closed:
-                raw = psycopg.connect(
-                    config.DATABASE_URL,
-                    row_factory=dict_row,
-                    autocommit=True,
-                    connect_timeout=config.DATABASE_CONNECT_TIMEOUT,
-                    # Neon poolers can reuse a physical connection across
-                    # search_path values. Disable psycopg server-side
-                    # prepared statements so a cached result type from the
-                    # public/Nexus schema cannot conflict with Medhunt.
-                    prepare_threshold=None,
-                )
-                connection = _Connection(raw, postgres=True)
-                _configure_postgres_namespace(connection)
-                _POSTGRES_CONNECTION = raw
-            else:
-                connection = _Connection(raw, postgres=True)
+        if _POSTGRES_POOL is None:
+            with _POSTGRES_POOL_LOCK:
+                if _POSTGRES_POOL is None:
+                    def configure(raw):
+                        _configure_postgres_namespace(_Connection(raw, postgres=True))
+
+                    _POSTGRES_POOL = ConnectionPool(
+                        conninfo=config.DATABASE_URL,
+                        min_size=1,
+                        max_size=config.DATABASE_POOL_SIZE,
+                        timeout=config.DATABASE_CONNECT_TIMEOUT,
+                        configure=configure,
+                        kwargs={
+                            "row_factory": dict_row,
+                            "autocommit": True,
+                            "connect_timeout": config.DATABASE_CONNECT_TIMEOUT,
+                            # A Neon transaction pooler can move work between
+                            # physical connections. Avoid server-side prepared
+                            # statements whose cached types may cross schemas.
+                            "prepare_threshold": None,
+                        },
+                    )
+
+        # A bounded pool lets queue workers perform short Neon transactions in
+        # parallel while keeping the database connection count predictable.
+        with _POSTGRES_POOL.connection(
+            timeout=config.DATABASE_CONNECT_TIMEOUT,
+        ) as raw:
+            connection = _Connection(raw, postgres=True)
             try:
                 # Hosted PostgreSQL poolers may discard session-level SET
                 # values between autocommit statements. Keep schema setup and
@@ -659,11 +666,7 @@ def _conn():
                     if not raw.autocommit:
                         raw.rollback()
                 except Exception:
-                    try:
-                        raw.close()
-                    except Exception:
-                        pass
-                    _POSTGRES_CONNECTION = None
+                    pass
                 raise
         return
 
@@ -2854,8 +2857,7 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
         active_rows = connection.execute(
             """SELECT id FROM contact_lookup_queue
                WHERE status IN ('queued','retry','processing')
-               ORDER BY CASE WHEN status='processing' THEN 0 ELSE 1 END,
-                        next_attempt_at,created,id"""
+               ORDER BY created,id"""
         ).fetchall()
     positions = {int(row["id"]): index for index, row in enumerate(active_rows)}
     items = []
@@ -2909,7 +2911,7 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                              SELECT 1 FROM contact_lookup_controls control
                              WHERE control.requested_by=q0.requested_by AND control.paused=1
                            )
-                         ORDER BY q0.next_attempt_at,q0.created,q0.id
+                         ORDER BY q0.created,q0.id
                          FOR UPDATE SKIP LOCKED LIMIT 1
                        )
                        UPDATE contact_lookup_queue q
@@ -2926,7 +2928,7 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                        SELECT 1 FROM contact_lookup_controls control
                        WHERE control.requested_by=q0.requested_by AND control.paused=1
                      )
-                   ORDER BY q0.next_attempt_at,q0.created,q0.id LIMIT 1""", (now,),
+                   ORDER BY q0.created,q0.id LIMIT 1""", (now,),
             ).fetchone()
             if not row:
                 return None

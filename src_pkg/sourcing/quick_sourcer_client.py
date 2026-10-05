@@ -597,7 +597,9 @@ def apply_to_candidate(candidate_id: int, result: dict) -> dict:
     return public
 
 
-def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
+def lookup_candidate(
+    candidate_id: int, refresh: bool = False, *, candidate: dict | None = None,
+) -> dict:
     """Reuse trusted saved contacts, or look the candidate up through Quick Sourcer.
 
     An uncached search takes 30-90 seconds because the API drives a real
@@ -606,7 +608,7 @@ def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
     directly without spending a Quick Sourcer request. Quick Sourcer contacts
     themselves continue to use the provider lookup cache and its TTL.
     """
-    candidate = store.get_candidate(candidate_id)
+    candidate = candidate or store.get_candidate(candidate_id)
     if not candidate:
         return {"status": "failed", "emails": [], "phones": [], "phone_contacts": [],
                 "resume_required": False, "location_match": None}

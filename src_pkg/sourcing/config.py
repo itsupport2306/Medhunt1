@@ -390,6 +390,7 @@ if _USES_APP_HOME_LAYOUT and not _db_path.is_absolute():
 DB_PATH = str(_db_path.resolve()) if _db_path.is_absolute() else str(_db_path)
 LOG_PATH = str((LOG_DIR / "backend.log").resolve())
 DATABASE_CONNECT_TIMEOUT = max(3, int(os.getenv("DATABASE_CONNECT_TIMEOUT", "10")))
+DATABASE_POOL_SIZE = max(1, min(20, int(os.getenv("DATABASE_POOL_SIZE", "20"))))
 RESUME_DOWNLOAD_DIR = Path(
     os.getenv("RESUME_DOWNLOAD_DIR", str(Path.home() / "Downloads"))
 ).resolve()

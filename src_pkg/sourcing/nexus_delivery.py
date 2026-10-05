@@ -51,6 +51,12 @@ def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> d
     """
     if not config.NEXUS_SYNC_ENABLED:
         return None
+    # New extension lookups normally capture the resume after enrichment. Most
+    # candidates therefore have no stored resume at this point; check that in
+    # one query before doing route, contact-trust, and DNC work.
+    resumes = store.list_resumes(int(candidate_id))
+    if not resumes:
+        return None
     candidate = store.get_candidate(int(candidate_id))
     route = ats_routing.stored(candidate or {}, user_id)
     if route.get("destination") != "nexus":
@@ -60,9 +66,6 @@ def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> d
         projected.get("contacts_trusted") is True
         and (projected.get("emails") or projected.get("phones"))
     ):
-        return None
-    resumes = store.list_resumes(int(candidate_id))
-    if not resumes:
         return None
     latest = resumes[0]
     if int(latest.get("size") or 0) > config.NEXUS_MAX_RESUME_BYTES:
