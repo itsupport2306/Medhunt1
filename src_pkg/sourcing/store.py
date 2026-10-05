@@ -865,6 +865,21 @@ def get_candidate(candidate_id):
         return _row(row) if row else None
 
 
+def get_candidates(candidate_ids):
+    """Load a bounded candidate selection in one database round trip."""
+    ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
+    if not ordered_ids:
+        return []
+    placeholders = ",".join("?" for _ in ordered_ids)
+    with _conn() as connection:
+        rows = connection.execute(
+            f"SELECT * FROM candidates WHERE id IN ({placeholders})",
+            ordered_ids,
+        ).fetchall()
+    by_id = {int(row["id"]): _row(row) for row in rows}
+    return [by_id[candidate_id] for candidate_id in ordered_ids if candidate_id in by_id]
+
+
 def get_candidate_ats_route(candidate_id: int, user_id: str) -> dict | None:
     owner = str(user_id or "").strip()[:200]
     if not owner:
@@ -3621,6 +3636,12 @@ def _blocked_contact_keys(connection) -> set[str]:
     }
 
 
+def dnc_contact_keys() -> set[str]:
+    """Load the suppression set once for a batch contact projection."""
+    with _conn() as connection:
+        return _blocked_contact_keys(connection)
+
+
 def add_dnc(value, reason=""):
     key = contact_key(value)
     if not key:
@@ -3671,8 +3692,8 @@ def dnc_blocked(values):
     return set(normalized) & blocked
 
 
-def filter_dnc_groups(groups):
-    """Filter several contact groups with one database query."""
+def filter_dnc_groups(groups, *, blocked_keys=None):
+    """Filter contact groups, optionally using a preloaded suppression set."""
     cleaned_groups = {}
     all_normalized = []
     for group, values in (groups or {}).items():
@@ -3683,8 +3704,11 @@ def filter_dnc_groups(groups):
     normalized = list(dict.fromkeys(all_normalized))
     if not normalized:
         return cleaned_groups
-    with _conn() as connection:
-        blocked = _blocked_contact_keys(connection)
+    if blocked_keys is None:
+        with _conn() as connection:
+            blocked = _blocked_contact_keys(connection)
+    else:
+        blocked = set(blocked_keys)
     return {
         group: [value for value in values if contact_key(value) not in blocked]
         for group, values in cleaned_groups.items()

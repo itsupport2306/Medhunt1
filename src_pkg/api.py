@@ -587,16 +587,13 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
         }
     waiting_resume_ids = []
     if config.NEXUS_SYNC_ENABLED:
-        for candidate_id in dict.fromkeys(body.candidate_ids):
-            candidate = store.get_candidate(candidate_id)
-            if not candidate:
-                continue
-            projected = contact_access.project_candidate(candidate)
+        candidates = store.get_candidates(body.candidate_ids)
+        for projected in contact_access.project_candidates(candidates):
             if (
                 projected.get("contacts_trusted") is True
                 and (projected.get("emails") or projected.get("phones"))
             ):
-                waiting_resume_ids.append(candidate_id)
+                waiting_resume_ids.append(int(projected["id"]))
     return store.nexus_delivery_summary(
         body.candidate_ids, waiting_resume_ids=waiting_resume_ids,
     )
