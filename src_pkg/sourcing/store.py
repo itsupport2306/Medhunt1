@@ -2711,13 +2711,13 @@ class ContactLookupQueueLimitError(ValueError):
 def contact_lookup_user_limit(
     now: datetime | None = None, limit_override: int | None = None,
 ) -> int | None:
-    """Return the configured user limit; no per-user cap after 4 PM Pacific."""
+    """Return the configured cap, lifted after 4 p.m. and on Pacific weekends."""
     pacific_now = (now or datetime.now(ZoneInfo("America/Los_Angeles")))
     if pacific_now.tzinfo is None:
         pacific_now = pacific_now.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
     else:
         pacific_now = pacific_now.astimezone(ZoneInfo("America/Los_Angeles"))
-    if pacific_now.hour >= 16:
+    if pacific_now.weekday() >= 5 or pacific_now.hour >= 16:
         return None
     limit = (
         config.CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER

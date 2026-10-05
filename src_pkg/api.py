@@ -569,6 +569,7 @@ def halo_api_monitor():
             "per_user_limit": store.contact_lookup_user_limit(),
             "per_user_limit_timezone": "America/Los_Angeles",
             "per_user_unlimited_after": "16:00",
+            "per_user_unlimited_weekends": ["Saturday", "Sunday"],
             "current_request_id": current_request_id,
         },
     }
@@ -635,6 +636,7 @@ def contact_lookup_queue_control(request: Request):
         "selection_limit": limit,
         "limit_timezone": "America/Los_Angeles",
         "unlimited_after": "16:00",
+        "unlimited_weekends": ["Saturday", "Sunday"],
     }
 
 
@@ -651,6 +653,7 @@ def update_contact_lookup_queue_control(body: ContactLookupControlIn, request: R
     )
     result["limit_timezone"] = "America/Los_Angeles"
     result["unlimited_after"] = "16:00"
+    result["unlimited_weekends"] = ["Saturday", "Sunday"]
     return result
 
 
