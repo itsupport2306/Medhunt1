@@ -614,13 +614,36 @@ def _conn():
     if config.DATABASE_URL:
         global _POSTGRES_POOL
         try:
+            import psycopg
             from psycopg.rows import dict_row
-            from psycopg_pool import ConnectionPool
         except ImportError as exc:  # pragma: no cover - dependency error is explicit
             raise RuntimeError(
-                "DATABASE_URL is configured but PostgreSQL support is not installed. "
+                "DATABASE_URL is configured but psycopg is not installed. "
                 "Run: pip install -r requirements.txt"
             ) from exc
+        try:
+            from psycopg_pool import ConnectionPool
+        except ImportError:
+            # Keep the service available if a deployment installs psycopg but
+            # accidentally omits the optional pool package. This path is
+            # slower, but requests and the queue continue to function.
+            raw = psycopg.connect(
+                config.DATABASE_URL,
+                row_factory=dict_row,
+                autocommit=True,
+                connect_timeout=config.DATABASE_CONNECT_TIMEOUT,
+                prepare_threshold=None,
+            )
+            connection = _Connection(raw, postgres=True)
+            try:
+                _configure_postgres_namespace(connection)
+                with raw.transaction():
+                    _activate_postgres_namespace(connection)
+                    _prepare_postgres(connection)
+                    yield connection
+            finally:
+                raw.close()
+            return
 
         if _POSTGRES_POOL is None:
             with _POSTGRES_POOL_LOCK:
