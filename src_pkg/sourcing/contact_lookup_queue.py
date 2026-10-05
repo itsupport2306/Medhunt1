@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import queue
 import threading
 import time
 
@@ -13,6 +14,10 @@ from . import (
 
 _STOP = threading.Event()
 _THREADS: list[threading.Thread] = []
+_DISPATCH_THREAD: threading.Thread | None = None
+_READY_JOBS: queue.Queue = queue.Queue(
+    maxsize=config.CONTACT_LOOKUP_MAX_CONCURRENT,
+)
 _THREAD_LOCK = threading.Lock()
 _MAX_ATTEMPTS = 3
 
@@ -62,10 +67,7 @@ def _retry(job: dict, reason: str) -> dict:
     return {"status": "retry", "job_id": int(job["id"]), "retry_in": delay}
 
 
-def process_once() -> dict | None:
-    job = store.claim_contact_lookup_job()
-    if not job:
-        return None
+def _process_job(job: dict) -> dict:
     candidate_id = int(job["candidate_id"])
     if store.contact_lookup_paused(str(job.get("requested_by") or "")):
         store.defer_contact_lookup_job(int(job["id"]))
@@ -113,19 +115,48 @@ def process_once() -> dict | None:
         return _retry(job, f"unexpected_{type(exc).__name__}")
 
 
+def process_once() -> dict | None:
+    job = store.claim_contact_lookup_job()
+    return _process_job(job) if job else None
+
+
 def _run() -> None:
     while not _STOP.is_set():
         try:
-            processed = process_once()
+            job = _READY_JOBS.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        try:
+            _process_job(job)
         except Exception:
             logging.getLogger("medhunt.lookup").exception("Contact lookup queue worker failed")
-            processed = None
-        if not processed:
+        finally:
+            _READY_JOBS.task_done()
+
+
+def _dispatch() -> None:
+    """Fill the local worker queue with one durable database claim batch."""
+    while not _STOP.is_set():
+        capacity = max(0, config.CONTACT_LOOKUP_MAX_CONCURRENT - _READY_JOBS.qsize())
+        if not capacity:
+            _STOP.wait(0.25)
+            continue
+        try:
+            jobs = store.claim_contact_lookup_jobs(capacity)
+        except Exception:
+            logging.getLogger("medhunt.lookup").exception("Contact lookup dispatcher failed")
+            _STOP.wait(2.0)
+            continue
+        for job in jobs:
+            if _STOP.is_set():
+                break
+            _READY_JOBS.put(job)
+        if not jobs:
             _STOP.wait(1.0)
 
 
 def start() -> None:
-    global _THREADS
+    global _THREADS, _DISPATCH_THREAD
     with _THREAD_LOCK:
         if any(thread.is_alive() for thread in _THREADS):
             return
@@ -138,16 +169,25 @@ def start() -> None:
             )
             for worker_number in range(1, config.CONTACT_LOOKUP_MAX_CONCURRENT + 1)
         ]
+        _DISPATCH_THREAD = threading.Thread(
+            target=_dispatch,
+            name="contact-lookup-dispatcher",
+            daemon=True,
+        )
         for thread in _THREADS:
             thread.start()
+        _DISPATCH_THREAD.start()
 
 
 def stop() -> None:
-    global _THREADS
+    global _THREADS, _DISPATCH_THREAD
     _STOP.set()
     deadline = time.monotonic() + 3.0
+    if _DISPATCH_THREAD and _DISPATCH_THREAD.is_alive():
+        _DISPATCH_THREAD.join(timeout=max(0.0, deadline - time.monotonic()))
     for thread in _THREADS:
         remaining = deadline - time.monotonic()
         if thread.is_alive() and remaining > 0:
             thread.join(timeout=remaining)
     _THREADS = []
+    _DISPATCH_THREAD = None

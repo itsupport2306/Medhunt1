@@ -630,9 +630,9 @@ def _conn():
 
                     _POSTGRES_POOL = ConnectionPool(
                         conninfo=config.DATABASE_URL,
-                        min_size=1,
+                        min_size=config.DATABASE_POOL_SIZE,
                         max_size=config.DATABASE_POOL_SIZE,
-                        timeout=config.DATABASE_CONNECT_TIMEOUT,
+                        timeout=max(60, config.DATABASE_CONNECT_TIMEOUT),
                         configure=configure,
                         kwargs={
                             "row_factory": dict_row,
@@ -648,7 +648,7 @@ def _conn():
         # A bounded pool lets queue workers perform short Neon transactions in
         # parallel while keeping the database connection count predictable.
         with _POSTGRES_POOL.connection(
-            timeout=config.DATABASE_CONNECT_TIMEOUT,
+            timeout=max(60, config.DATABASE_CONNECT_TIMEOUT),
         ) as raw:
             connection = _Connection(raw, postgres=True)
             try:
@@ -2878,10 +2878,16 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
     }
 
 
-def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
+def claim_contact_lookup_jobs(
+    limit: int, lease_seconds: float = 210.0,
+) -> list[dict]:
+    """Claim a FIFO batch in one transaction for the in-process workers."""
     now = time.time()
     lease_until = now + max(30.0, float(lease_seconds))
     concurrency_limit = int(config.CONTACT_LOOKUP_MAX_CONCURRENT)
+    requested = max(0, min(concurrency_limit, int(limit or 0)))
+    if not requested:
+        return []
     with _CONTACT_LOOKUP_CLAIM_LOCK:
         with _conn() as connection, connection.transaction():
             if connection.postgres:
@@ -2901,9 +2907,10 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                    WHERE status='processing' AND lease_until>?""", (now,),
             )) or 0
             if int(active_count) >= concurrency_limit:
-                return None
+                return []
+            capacity = min(requested, concurrency_limit - int(active_count))
             if connection.postgres:
-                row = connection.execute(
+                rows = connection.execute(
                     """WITH picked AS (
                          SELECT q0.id FROM contact_lookup_queue q0
                          WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
@@ -2912,38 +2919,46 @@ def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
                              WHERE control.requested_by=q0.requested_by AND control.paused=1
                            )
                          ORDER BY q0.created,q0.id
-                         FOR UPDATE SKIP LOCKED LIMIT 1
+                         FOR UPDATE SKIP LOCKED LIMIT ?
                        )
                        UPDATE contact_lookup_queue q
                        SET status='processing',attempts=q.attempts+1,
                            lease_until=?,updated=? FROM picked
                        WHERE q.id=picked.id RETURNING q.*""",
-                    (now, lease_until, now),
-                ).fetchone()
-                return dict(row) if row else None
-            row = connection.execute(
+                    (now, capacity, lease_until, now),
+                ).fetchall()
+                claimed = [dict(row) for row in rows]
+                claimed.sort(key=lambda row: (float(row.get("created") or 0), int(row["id"])))
+                return claimed
+            rows = connection.execute(
                 """SELECT q0.* FROM contact_lookup_queue q0
                    WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
                      AND NOT EXISTS (
                        SELECT 1 FROM contact_lookup_controls control
                        WHERE control.requested_by=q0.requested_by AND control.paused=1
                      )
-                   ORDER BY q0.created,q0.id LIMIT 1""", (now,),
-            ).fetchone()
-            if not row:
-                return None
-            updated = connection.execute(
-                """UPDATE contact_lookup_queue
-                   SET status='processing',attempts=attempts+1,lease_until=?,updated=?
-                   WHERE id=? AND status IN ('queued','retry')""",
-                (lease_until, now, int(row["id"])),
-            )
-            if updated.rowcount != 1:
-                return None
-            claimed = connection.execute(
-                "SELECT * FROM contact_lookup_queue WHERE id=?", (int(row["id"]),),
-            ).fetchone()
-            return dict(claimed) if claimed else None
+                   ORDER BY q0.created,q0.id LIMIT ?""", (now, capacity),
+            ).fetchall()
+            claimed = []
+            for row in rows:
+                updated = connection.execute(
+                    """UPDATE contact_lookup_queue
+                       SET status='processing',attempts=attempts+1,lease_until=?,updated=?
+                       WHERE id=? AND status IN ('queued','retry')""",
+                    (lease_until, now, int(row["id"])),
+                )
+                if updated.rowcount == 1:
+                    claimed.append({
+                        **dict(row), "status": "processing",
+                        "attempts": int(row["attempts"] or 0) + 1,
+                        "lease_until": lease_until, "updated": now,
+                    })
+            return claimed
+
+
+def claim_contact_lookup_job(lease_seconds: float = 210.0) -> dict | None:
+    claimed = claim_contact_lookup_jobs(1, lease_seconds=lease_seconds)
+    return claimed[0] if claimed else None
 
 
 def finish_contact_lookup_job(job_id: int, status: str, result=None, *, error: str = "", retry_at: float = 0) -> None:

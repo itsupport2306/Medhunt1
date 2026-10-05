@@ -8,10 +8,14 @@ still applies.
 """
 from __future__ import annotations
 
+import time
+
 import httpx
 import pytest
 
-from sourcing import config, contact_access, quick_sourcer_client, store
+from sourcing import (
+    config, contact_access, contact_lookup_queue, quick_sourcer_client, store,
+)
 import api as api_module
 
 
@@ -217,6 +221,48 @@ def test_retry_keeps_fifo_priority_over_new_queue_jobs(
     assert before["items"][0]["position"] == 0
     assert after["items"][0]["position"] == 0
     assert store.claim_contact_lookup_job()["candidate_id"] == first
+
+
+def test_dispatcher_claims_queue_in_batches_and_workers_finish(
+    quick_sourcer_enabled, monkeypatch,
+):
+    monkeypatch.setattr(config, "CONTACT_LOOKUP_MAX_CONCURRENT", 4)
+    store.reset()
+    candidate_ids = [
+        store.add_candidate(
+            f"Nurse {index}", "Austin, Texas", source="indeed",
+            source_id=f"dispatcher-{index}",
+        )
+        for index in range(6)
+    ]
+    store.enqueue_contact_lookup_jobs(
+        "dispatcher-run", candidate_ids, "dispatcher-user",
+        per_user_limit=10,
+    )
+    monkeypatch.setattr(
+        contact_lookup_queue.quick_sourcer_client,
+        "lookup_candidate",
+        lambda candidate_id, candidate=None: {
+            "status": "not_found", "emails": [], "phones": [],
+            "phone_contacts": [], "resume_required": False,
+            "location_match": None,
+        },
+    )
+
+    contact_lookup_queue.start()
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            status = store.list_contact_lookup_jobs(
+                "dispatcher-run", candidate_ids, "dispatcher-user",
+            )
+            if status["complete"] == len(candidate_ids):
+                break
+            time.sleep(0.05)
+        assert status["complete"] == len(candidate_ids)
+        assert all(item["status"] == "not_found" for item in status["items"])
+    finally:
+        contact_lookup_queue.stop()
 
 
 def test_do_not_contact_entries_are_still_suppressed(quick_sourcer_enabled, monkeypatch):
