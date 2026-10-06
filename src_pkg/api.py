@@ -45,7 +45,8 @@ async def lifespan(_app: FastAPI):
     # their respective stores. Do not contact any remote dependency before the
     # localhost API becomes ready: a slow pooled database connection or
     # provider probe must not make every browser-extension action unavailable.
-    if config.NEXUS_SYNC_REQUESTED and not config.NEXUS_SYNC_ENABLED:
+    if (config.NEXUS_SYNC_REQUESTED and not config.NEXUS_SYNC_ENABLED
+            and not nexus_delivery.worker_enabled()):
         logging.getLogger("medhunt.nexus").error(
             "Candidate synchronization was requested but is disabled (%s).",
             config.NEXUS_DISABLED_REASON,
@@ -586,7 +587,7 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
             "enabled": False, "destination": "ceipal", "items": [],
         }
     waiting_resume_ids = []
-    if config.NEXUS_SYNC_ENABLED:
+    if nexus_delivery.enabled_for(str(actor.get("sub") or "local")):
         candidates = store.get_candidates(body.candidate_ids)
         for projected in contact_access.project_candidates(candidates):
             if (
@@ -1209,7 +1210,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
     ceipal_sync_status = "disabled"
     nexus_contact_ready = bool(
         destination == "nexus"
-        and config.NEXUS_SYNC_ENABLED
+        and nexus_delivery.enabled_for(user_id)
         and contactable.get("contacts_trusted") is True
         and (contactable.get("phones") or contactable.get("emails"))
     )

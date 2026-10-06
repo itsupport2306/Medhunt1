@@ -10,6 +10,7 @@ from . import (
     ats_routing,
     config,
     contact_access,
+    healthboard_auth,
     nexus_sync,
     phone_policy,
     resume_enrichment,
@@ -41,6 +42,23 @@ _CLINICAL_ROLE_RE = re.compile(
 )
 
 
+def worker_enabled() -> bool:
+    return bool(
+        config.NEXUS_SYNC_ENABLED
+        or (healthboard_auth.enabled() and config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN)
+    )
+
+
+def enabled_for(user_id: str) -> bool:
+    if config.NEXUS_SYNC_ENABLED:
+        return True
+    try:
+        values = healthboard_auth.organization_ats_configuration(user_id, "nexus")
+        return bool(values and values.get("_configured", True))
+    except Exception:
+        return False
+
+
 def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> dict | None:
     """Queue a pre-existing latest resume after contacts become deliverable.
 
@@ -49,7 +67,7 @@ def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> d
     without sending every historical version or weakening the trusted-contact
     gate used by normal capture-time delivery.
     """
-    if not config.NEXUS_SYNC_ENABLED:
+    if not enabled_for(user_id):
         return None
     # New extension lookups normally capture the resume after enrichment. Most
     # candidates therefore have no stored resume at this point; check that in
@@ -166,9 +184,38 @@ def _retry_at(delivery: dict, error: nexus_sync.NexusRetryableError) -> float:
     return time.time() + min(300.0, float(2 ** min(attempts, 8)))
 
 
+def _delivery_settings(user_id: str) -> nexus_sync.NexusSettings:
+    """Prefer the recruiter's organization connection, then backend defaults."""
+    values = healthboard_auth.organization_ats_configuration(user_id, "nexus")
+    if values.get("_managed") and not values.get("_configured"):
+        return nexus_sync.NexusSettings(enabled=False)
+    if not values:
+        return nexus_sync.NexusSettings.from_config()
+    return nexus_sync.NexusSettings(
+        enabled=True,
+        base_url=str(values.get("base_url") or "").rstrip("/"),
+        auth_method=str(values.get("auth_method") or "password").casefold(),
+        token_url=str(values.get("token_url") or ""),
+        token_payload_style=str(values.get("token_payload_style") or "form").casefold(),
+        client_id=str(values.get("client_id") or ""),
+        client_secret=str(values.get("client_secret") or ""),
+        username=str(values.get("username") or ""),
+        password=str(values.get("password") or ""),
+        static_token=str(values.get("static_token") or ""),
+        org_code=str(values.get("org_code") or ""),
+        token_basic=str(values.get("token_basic") or ""),
+        resume_doc_type_id=str(values.get("resume_doc_type_id") or ""),
+        default_profile=dict(values.get("default_profile") or {}),
+        timeout_seconds=config.NEXUS_TIMEOUT,
+        connect_timeout_seconds=config.NEXUS_CONNECT_TIMEOUT,
+        master_cache_seconds=config.NEXUS_MASTER_CACHE_SECONDS,
+        max_resume_bytes=config.NEXUS_MAX_RESUME_BYTES,
+    )
+
+
 def process_once() -> dict | None:
     """Process at most one leased outbox row; return a non-PII status summary."""
-    if not config.NEXUS_SYNC_ENABLED:
+    if not worker_enabled():
         return None
     delivery = store.claim_nexus_delivery(
         lease_seconds=config.NEXUS_LEASE_SECONDS,
@@ -223,7 +270,9 @@ def process_once() -> dict | None:
                 )
 
         result = nexus_sync.process_delivery(
-            payload, resume_pdf, before_write=before_write,
+            payload, resume_pdf,
+            settings=_delivery_settings(str(delivery.get("requested_by") or "")),
+            before_write=before_write,
         )
         nexus_candidate_id = str(result.get("nexus_candidate_id") or "").strip()
         if not nexus_candidate_id:
@@ -308,7 +357,7 @@ def _run() -> None:
 
 def start() -> None:
     global _THREAD
-    if not config.NEXUS_SYNC_ENABLED:
+    if not worker_enabled():
         return
     with _THREAD_LOCK:
         if _THREAD and _THREAD.is_alive():

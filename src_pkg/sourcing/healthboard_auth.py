@@ -12,6 +12,7 @@ from . import config
 _CACHE_LOCK = threading.Lock()
 _USER_CACHE: dict[str, tuple[float, dict]] = {}
 _LOOKUP_LIMIT_CACHE: dict[str, tuple[float, int]] = {}
+_ATS_CONFIGURATION_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 
 
 def enabled() -> bool:
@@ -229,6 +230,37 @@ def organization_zoom_access(employer_id: str) -> str:
     )
     response.raise_for_status()
     return str(response.json().get("access_token") or "")
+
+
+def organization_ats_configuration(user_id: str, provider: str) -> dict:
+    """Read encrypted-at-rest organization ATS settings over the service channel."""
+    owner = str(user_id or "").strip()
+    destination = str(provider or "").strip().casefold()
+    if not owner or destination not in {"nexus", "ceipal"}:
+        return {}
+    if not enabled() or not config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN:
+        return {}
+    key = (owner, destination)
+    now = time.time()
+    with _CACHE_LOCK:
+        cached = _ATS_CONFIGURATION_CACHE.get(key)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+    response = httpx.post(
+        _url("/api/extension/medhunt/ats-configuration"),
+        headers={"X-Medhunt-Service-Token": config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN},
+        json={"user_id": owner, "provider": destination},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    result = dict(payload.get("settings") or {}) if payload.get("configured") else {}
+    if payload.get("managed"):
+        result["_managed"] = True
+        result["_configured"] = bool(payload.get("configured"))
+    with _CACHE_LOCK:
+        _ATS_CONFIGURATION_CACHE[key] = (now + 5, dict(result))
+    return result
 
 
 def report_message_event(*, event_id: str, conversation: dict, event_type: str,
