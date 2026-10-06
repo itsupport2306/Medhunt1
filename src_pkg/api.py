@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.4"
+APP_VERSION = "3.36.5"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -301,6 +301,17 @@ class ContactLookupBatchIn(BaseModel):
 
 class ContactLookupControlIn(BaseModel):
     paused: bool
+
+
+class HaloBackfillProfileIn(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=80)
+    name: str = Field(min_length=3, max_length=200)
+    location: str = Field(min_length=2, max_length=200)
+
+
+class HaloBackfillBatchIn(BaseModel):
+    run_id: str = Field(min_length=8, max_length=80)
+    profiles: list[HaloBackfillProfileIn] = Field(min_length=1, max_length=100)
 
 
 class NexusDeliverySummaryIn(BaseModel):
@@ -564,15 +575,56 @@ def halo_api_monitor():
             "configured": bool(status.get("configured")),
             "search_pool": str(status.get("search_pool") or ""),
             **dict(status.get("requests") or {}),
-            "queued": queue["queued"],
-            "processing": queue["processing"],
+            "queued": max(0, queue["queued"] - queue["backfill_queued"]),
+            "processing": max(0, queue["processing"] - queue["backfill_processing"]),
+            "backfill_queued": queue["backfill_queued"],
+            "backfill_processing": queue["backfill_processing"],
             "concurrency_limit": config.CONTACT_LOOKUP_MAX_CONCURRENT,
+            "backfill_concurrency_limit": config.CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT,
             "per_user_limit": store.contact_lookup_user_limit(),
             "per_user_limit_timezone": "America/Los_Angeles",
             "per_user_unlimited_after": "16:00",
             "per_user_unlimited_weekends": ["Saturday", "Sunday"],
             "current_request_id": current_request_id,
         },
+    }
+
+
+@app.post("/internal/halo/contact-backfill")
+def enqueue_halo_contact_backfill(body: HaloBackfillBatchIn):
+    """Stage Halo Neon profiles in the shared low-priority lookup queue."""
+    candidate_ids: list[int] = []
+    external_refs: dict[int, str] = {}
+    for profile in body.profiles:
+        existing = store.get_candidate_by_source("halo_neon", profile.profile_id)
+        if existing:
+            candidate_id = int(existing["id"])
+            store.update_candidate(
+                candidate_id, name=profile.name.strip(),
+                location=profile.location.strip(), hometown=profile.location.strip(),
+            )
+        else:
+            candidate_id = int(store.add_candidate(
+                profile.name, profile.location, source="halo_neon",
+                source_id=profile.profile_id, hometown=profile.location,
+            ))
+        candidate_ids.append(candidate_id)
+        external_refs[candidate_id] = profile.profile_id
+    items = store.enqueue_contact_lookup_jobs(
+        body.run_id, candidate_ids, "halo-neon-backfill",
+        job_source="halo_backfill", priority=10,
+        external_refs=external_refs, bypass_user_limit=True,
+    )
+    return {
+        "status": "queued", "run_id": body.run_id,
+        "items": [
+            {
+                "profile_id": item.get("external_ref"),
+                "candidate_id": item.get("candidate_id"),
+                "status": item.get("status"),
+            }
+            for item in items
+        ],
     }
 
 

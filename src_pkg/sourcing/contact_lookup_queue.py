@@ -35,14 +35,15 @@ def _terminal(job: dict, status: str, result: dict) -> dict:
     try:
         candidate = store.get_candidate(candidate_id) or {}
         identity = f"{user_id}|{run_id}|{candidate_id}|{public_status}"
-        healthboard_auth.report_enrichment_service(
-            user_id=user_id,
-            event_id=hashlib.sha256(identity.encode()).hexdigest()[:32],
-            candidate_id=candidate_id,
-            status=public_status,
-            source=str(candidate.get("source") or "quick_sourcer"),
-            run_id=run_id,
-        )
+        if str(job.get("job_source") or "") != "halo_backfill":
+            healthboard_auth.report_enrichment_service(
+                user_id=user_id,
+                event_id=hashlib.sha256(identity.encode()).hexdigest()[:32],
+                candidate_id=candidate_id,
+                status=public_status,
+                source=str(candidate.get("source") or "quick_sourcer"),
+                run_id=run_id,
+            )
     except Exception as exc:
         logging.getLogger("medhunt.analytics").warning(
             "Queued enrichment reporting failed (%s).", type(exc).__name__,
@@ -58,6 +59,18 @@ def _retry(job: dict, reason: str) -> dict:
             "phone_contacts": [], "resume_required": False,
             "location_match": None,
         }
+        if str(job.get("job_source") or "") == "halo_backfill":
+            try:
+                healthboard_auth.report_halo_profile_backfill(
+                    profile_id=str(job.get("external_ref") or ""),
+                    candidate_id=int(job["candidate_id"]), status="failed",
+                    result=result, attempts=attempts,
+                )
+            except Exception:
+                logging.getLogger("medhunt.lookup").warning(
+                    "Could not report terminal Halo backfill failure for candidate %s.",
+                    job.get("candidate_id"),
+                )
         return _terminal(job, "failed", result)
     delay = 15.0 * (3 ** (attempts - 1))
     store.finish_contact_lookup_job(
@@ -82,11 +95,30 @@ def _process_job(job: dict) -> dict:
             "location_match": None,
         })
     try:
+        if str(job.get("job_source") or "") == "halo_backfill":
+            healthboard_auth.report_halo_profile_backfill(
+                profile_id=str(job.get("external_ref") or ""),
+                candidate_id=candidate_id, status="processing", result={},
+                attempts=int(job.get("attempts") or 0),
+            )
         result = quick_sourcer_client.lookup_candidate(
             candidate_id, candidate=candidate,
         )
         if result.get("status") == "failed":
             return _retry(job, "temporary_lookup_failure")
+        if str(job.get("job_source") or "") == "halo_backfill":
+            # Callback before making the queue item terminal. If Halo is
+            # temporarily unavailable, retrying reuses the Quick Sourcer cache
+            # instead of spending another live search.
+            healthboard_auth.report_halo_profile_backfill(
+                profile_id=str(job.get("external_ref") or ""),
+                candidate_id=candidate_id,
+                status=str(result.get("status") or "failed"),
+                result=result,
+                attempts=int(job.get("attempts") or 0),
+            )
+            status = "succeeded" if result.get("status") == "found" else "not_found"
+            return _terminal(job, status, result)
         destination = "ceipal" if str(job.get("delivery_target") or "nexus").casefold() == "ceipal" else "nexus"
         user_id = str(job.get("requested_by") or "")
         ats_routing.set_candidate_target(candidate_id, destination, user_id)

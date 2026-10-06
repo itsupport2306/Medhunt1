@@ -110,6 +110,28 @@ def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
     return bool(response.json().get("recorded", True))
 
 
+def report_halo_profile_backfill(*, profile_id: str, candidate_id: int,
+                                 status: str, result: dict, attempts: int = 0) -> bool:
+    """Return a low-priority queue result to Halo's Neon profile record."""
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not enabled() or not token or not profile_id:
+        raise RuntimeError("Halo backfill callback is not configured.")
+    response = httpx.post(
+        _url("/api/extension/medhunt/contact-backfill-result"),
+        headers={"X-Medhunt-Service-Token": token},
+        json={
+            "profile_id": str(profile_id), "candidate_id": int(candidate_id),
+            "status": str(status), "attempts": int(attempts),
+            "emails": list(result.get("emails") or []),
+            "phones": list(result.get("phones") or []),
+            "phone_contacts": list(result.get("phone_contacts") or []),
+        },
+        timeout=max(10.0, config.HEALTHBOARD_AUTH_TIMEOUT),
+    )
+    response.raise_for_status()
+    return bool(response.json().get("recorded"))
+
+
 def medhunt_ceipal_candidate(*, user_id: str, candidate: dict) -> dict:
     """Ask Halo to upload this Ceipal-assigned candidate directly.
 

@@ -287,6 +287,16 @@ CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER = max(
 CONTACT_LOOKUP_MAX_CONCURRENT = max(
     1, min(80, int(os.getenv("CONTACT_LOOKUP_MAX_CONCURRENT", "80"))),
 )
+# Halo's overnight Neon backfill shares the durable queue but may occupy only
+# this many slots. Interactive extension jobs can use every remaining slot and
+# always win the next available worker.
+CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT = max(
+    1,
+    min(
+        CONTACT_LOOKUP_MAX_CONCURRENT,
+        int(os.getenv("CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT", "10")),
+    ),
+)
 QUICK_SOURCER_ENABLED = bool(
     QUICK_SOURCER_BASE_URL and QUICK_SOURCER_API_KEY
 ) and os.getenv("QUICK_SOURCER_ENABLED", "1").strip().lower() in ("1", "true", "yes")

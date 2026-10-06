@@ -133,6 +133,8 @@ CREATE TABLE IF NOT EXISTS contact_lookup_queue(
   id INTEGER PRIMARY KEY AUTOINCREMENT, job_key TEXT UNIQUE NOT NULL,
   run_id TEXT NOT NULL, candidate_id INTEGER NOT NULL,
   requested_by TEXT DEFAULT '', delivery_target TEXT DEFAULT 'nexus',
+  job_source TEXT DEFAULT 'extension', priority INTEGER DEFAULT 100,
+  external_ref TEXT DEFAULT '',
   status TEXT DEFAULT 'queued',
   attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
   lease_until REAL DEFAULT 0, result TEXT DEFAULT '{}',
@@ -178,6 +180,8 @@ CREATE INDEX IF NOT EXISTS idx_contact_lookup_queue_ready
   ON contact_lookup_queue(status, next_attempt_at, created);
 CREATE INDEX IF NOT EXISTS idx_contact_lookup_processing_lease
   ON contact_lookup_queue(status, lease_until, updated);
+CREATE INDEX IF NOT EXISTS idx_contact_lookup_priority
+  ON contact_lookup_queue(status, job_source, priority, next_attempt_at, created);
 CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready
   ON nexus_deliveries(status, next_attempt_at, lease_until);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity
@@ -357,6 +361,8 @@ _POSTGRES_SCHEMA = (
          id BIGSERIAL PRIMARY KEY, job_key TEXT UNIQUE NOT NULL,
          run_id TEXT NOT NULL, candidate_id BIGINT NOT NULL,
          requested_by TEXT DEFAULT '', delivery_target TEXT DEFAULT 'nexus',
+         job_source TEXT DEFAULT 'extension', priority INTEGER DEFAULT 100,
+         external_ref TEXT DEFAULT '',
          status TEXT DEFAULT 'queued',
          attempts INTEGER DEFAULT 0,
          next_attempt_at DOUBLE PRECISION DEFAULT 0,
@@ -402,6 +408,9 @@ _POSTGRES_SCHEMA = (
     "ALTER TABLE nexus_deliveries ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE nexus_deliveries ADD COLUMN IF NOT EXISTS requested_by TEXT DEFAULT ''",
     "ALTER TABLE contact_lookup_queue ADD COLUMN IF NOT EXISTS delivery_target TEXT DEFAULT 'nexus'",
+    "ALTER TABLE contact_lookup_queue ADD COLUMN IF NOT EXISTS job_source TEXT DEFAULT 'extension'",
+    "ALTER TABLE contact_lookup_queue ADD COLUMN IF NOT EXISTS priority INTEGER DEFAULT 100",
+    "ALTER TABLE contact_lookup_queue ADD COLUMN IF NOT EXISTS external_ref TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS hometown TEXT DEFAULT ''",
     "ALTER TABLE candidates ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''",
@@ -442,6 +451,8 @@ _POSTGRES_SCHEMA = (
     "DROP INDEX IF EXISTS idx_contact_lookup_one_processing",
     "CREATE INDEX IF NOT EXISTS idx_contact_lookup_processing_lease "
     "ON contact_lookup_queue(status, lease_until, updated)",
+    "CREATE INDEX IF NOT EXISTS idx_contact_lookup_priority "
+    "ON contact_lookup_queue(status, job_source, priority, next_attempt_at, created)",
     "CREATE INDEX IF NOT EXISTS idx_nexus_deliveries_ready "
     "ON nexus_deliveries(status, next_attempt_at, lease_until)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_nexus_one_processing_identity "
@@ -507,7 +518,7 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "provider_lookups": ("candidate_id",),
     "lookup_run_items": ("candidate_id",),
     "nexus_candidate_links": ("candidate_id",),
-    "contact_lookup_queue": ("delivery_target",),
+    "contact_lookup_queue": ("delivery_target", "job_source", "priority", "external_ref"),
     "resume_capture_locks": ("candidate_id",),
     "nexus_deliveries": ("candidate_id",),
     "sms_conversations": ("zoom_sender_user_id",),
@@ -521,6 +532,7 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_resume_extractions_candidate", "idx_provider_lookups_run",
     "idx_lookup_run_items_run", "idx_api_request_activity_provider",
     "idx_contact_lookup_queue_ready", "idx_contact_lookup_processing_lease",
+    "idx_contact_lookup_priority",
     "idx_nexus_deliveries_ready",
     "idx_nexus_one_processing_identity", "idx_nexus_one_active_identity",
     "idx_watcher_email_delivery_status",
@@ -752,6 +764,13 @@ def _conn():
             raw.execute(
                 "ALTER TABLE contact_lookup_queue ADD COLUMN delivery_target TEXT DEFAULT 'nexus'"
             )
+        for name, definition in (
+            ("job_source", "TEXT DEFAULT 'extension'"),
+            ("priority", "INTEGER DEFAULT 100"),
+            ("external_ref", "TEXT DEFAULT ''"),
+        ):
+            if name not in queue_columns:
+                raw.execute(f"ALTER TABLE contact_lookup_queue ADD COLUMN {name} {definition}")
         nexus_delivery_columns = {
             row["name"] for row in raw.execute("PRAGMA table_info(nexus_deliveries)")
         }
@@ -2769,13 +2788,19 @@ def contact_lookup_user_limit(
 
 def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = "",
                                 delivery_target: str = "nexus",
-                                per_user_limit: int | None = None) -> list[dict]:
+                                per_user_limit: int | None = None, *,
+                                job_source: str = "extension", priority: int = 100,
+                                external_refs: dict[int, str] | None = None,
+                                bypass_user_limit: bool = False) -> list[dict]:
     now = time.time()
     normalized_run = str(run_id or "").strip()
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     owner = str(requested_by or "")[:200]
     target = "ceipal" if str(delivery_target or "").casefold() == "ceipal" else "nexus"
-    limit = contact_lookup_user_limit(limit_override=per_user_limit)
+    source = "halo_backfill" if str(job_source).casefold() == "halo_backfill" else "extension"
+    normalized_priority = max(0, min(1000, int(priority)))
+    refs = {int(key): str(value or "")[:200] for key, value in (external_refs or {}).items()}
+    limit = None if bypass_user_limit else contact_lookup_user_limit(limit_override=per_user_limit)
     with _CONTACT_LOOKUP_ENQUEUE_LOCK:
         with _conn() as connection:
             if connection.postgres:
@@ -2811,11 +2836,13 @@ def enqueue_contact_lookup_jobs(run_id: str, candidate_ids, requested_by: str = 
             for candidate_id, job_key in new_jobs:
                 connection.execute(
                     """INSERT INTO contact_lookup_queue(
-                         job_key,run_id,candidate_id,requested_by,delivery_target,status,attempts,
+                         job_key,run_id,candidate_id,requested_by,delivery_target,
+                         job_source,priority,external_ref,status,attempts,
                          next_attempt_at,lease_until,result,last_error,created,updated
-                       ) VALUES(?,?,?,?,?,'queued',0,0,0,'{}','',?,?)
+                       ) VALUES(?,?,?,?,?,?,?,?,'queued',0,0,0,'{}','',?,?)
                        ON CONFLICT(job_key) DO NOTHING""",
-                    (job_key, normalized_run, candidate_id, owner, target, now, now),
+                    (job_key, normalized_run, candidate_id, owner, target, source,
+                     normalized_priority, refs.get(candidate_id, ""), now, now),
                 )
     return list_contact_lookup_jobs(
         normalized_run, ordered_ids, requested_by=str(requested_by or ""),
@@ -2880,7 +2907,7 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
         active_rows = connection.execute(
             """SELECT id FROM contact_lookup_queue
                WHERE status IN ('queued','retry','processing')
-               ORDER BY created,id"""
+               ORDER BY priority DESC,created,id"""
         ).fetchall()
     positions = {int(row["id"]): index for index, row in enumerate(active_rows)}
     items = []
@@ -2904,7 +2931,7 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
 def claim_contact_lookup_jobs(
     limit: int, lease_seconds: float = 210.0,
 ) -> list[dict]:
-    """Claim a FIFO batch in one transaction for the in-process workers."""
+    """Claim extension work first and cap the lower-priority Halo backfill."""
     now = time.time()
     lease_until = now + max(30.0, float(lease_seconds))
     concurrency_limit = int(config.CONTACT_LOOKUP_MAX_CONCURRENT)
@@ -2932,38 +2959,40 @@ def claim_contact_lookup_jobs(
             if int(active_count) >= concurrency_limit:
                 return []
             capacity = min(requested, concurrency_limit - int(active_count))
-            if connection.postgres:
-                rows = connection.execute(
-                    """WITH picked AS (
-                         SELECT q0.id FROM contact_lookup_queue q0
-                         WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
-                           AND NOT EXISTS (
-                             SELECT 1 FROM contact_lookup_controls control
-                             WHERE control.requested_by=q0.requested_by AND control.paused=1
-                           )
-                         ORDER BY q0.created,q0.id
-                         FOR UPDATE SKIP LOCKED LIMIT ?
-                       )
-                       UPDATE contact_lookup_queue q
-                       SET status='processing',attempts=q.attempts+1,
-                           lease_until=?,updated=? FROM picked
-                       WHERE q.id=picked.id RETURNING q.*""",
-                    (now, capacity, lease_until, now),
-                ).fetchall()
-                claimed = [dict(row) for row in rows]
-                claimed.sort(key=lambda row: (float(row.get("created") or 0), int(row["id"])))
-                return claimed
-            rows = connection.execute(
+            active_backfill = _scalar(connection.execute(
+                """SELECT COUNT(*) FROM contact_lookup_queue
+                   WHERE status='processing' AND lease_until>?
+                     AND job_source='halo_backfill'""", (now,),
+            )) or 0
+            common = """q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
+                     AND NOT EXISTS (
+                       SELECT 1 FROM contact_lookup_controls control
+                       WHERE control.requested_by=q0.requested_by AND control.paused=1
+                     )"""
+            extension_rows = connection.execute(
+                f"""SELECT q0.* FROM contact_lookup_queue q0
+                   WHERE {common} AND q0.job_source<>'halo_backfill'
+                   ORDER BY q0.priority DESC,q0.created,q0.id LIMIT ?""",
+                (now, capacity),
+            ).fetchall()
+            remaining = capacity - len(extension_rows)
+            backfill_capacity = min(
+                remaining,
+                max(0, int(config.CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT) - int(active_backfill)),
+            )
+            backfill_rows = connection.execute(
                 """SELECT q0.* FROM contact_lookup_queue q0
                    WHERE q0.status IN ('queued','retry') AND q0.next_attempt_at<=?
+                     AND q0.job_source='halo_backfill'
                      AND NOT EXISTS (
                        SELECT 1 FROM contact_lookup_controls control
                        WHERE control.requested_by=q0.requested_by AND control.paused=1
                      )
-                   ORDER BY q0.created,q0.id LIMIT ?""", (now, capacity),
-            ).fetchall()
+                   ORDER BY q0.priority DESC,q0.created,q0.id LIMIT ?""",
+                (now, backfill_capacity),
+            ).fetchall() if backfill_capacity else []
             claimed = []
-            for row in rows:
+            for row in [*extension_rows, *backfill_rows]:
                 updated = connection.execute(
                     """UPDATE contact_lookup_queue
                        SET status='processing',attempts=attempts+1,lease_until=?,updated=?
@@ -3008,16 +3037,21 @@ def contact_lookup_queue_counts() -> dict:
         row = connection.execute(
             """SELECT
                  SUM(CASE WHEN status IN ('queued','retry') THEN 1 ELSE 0 END) AS queued,
-                 SUM(CASE WHEN status='processing' AND lease_until>? THEN 1 ELSE 0 END) AS processing
-               FROM contact_lookup_queue""", (now,),
+                 SUM(CASE WHEN status='processing' AND lease_until>? THEN 1 ELSE 0 END) AS processing,
+                 SUM(CASE WHEN job_source='halo_backfill' AND status IN ('queued','retry') THEN 1 ELSE 0 END) AS backfill_queued,
+                 SUM(CASE WHEN job_source='halo_backfill' AND status='processing' AND lease_until>? THEN 1 ELSE 0 END) AS backfill_processing
+               FROM contact_lookup_queue""", (now, now),
         ).fetchone()
         processing_row = connection.execute(
             """SELECT job_key FROM contact_lookup_queue
                WHERE status='processing' AND lease_until>?
+                 AND job_source<>'halo_backfill'
                ORDER BY updated,id LIMIT 1""", (now,),
         ).fetchone()
     return {"queued": int((row and row["queued"]) or 0),
             "processing": int((row and row["processing"]) or 0),
+            "backfill_queued": int((row and row["backfill_queued"]) or 0),
+            "backfill_processing": int((row and row["backfill_processing"]) or 0),
             "processing_job_key": str((processing_row and processing_row["job_key"]) or "")}
 
 
