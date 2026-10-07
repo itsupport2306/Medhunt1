@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const ADAPTER_REVISION = "healthcare-directory-v10";
-  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST";
+  const ADAPTER_REVISION = "healthcare-directory-v11";
+  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST";
   if (window.__radixsolHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
   window.__radixsolHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
 
@@ -1177,7 +1177,15 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
-    for (const link of all("a[href]")) {
+    const detailNpi = location.pathname.match(
+      /^\/[a-z][a-z-]*\/(\d{10})(?:-[^/]*)?\/?$/i,
+    )?.[1] || "";
+    const candidateLinks = all("a[href]");
+    if (detailNpi && !candidateLinks.some((link) => {
+      const href = absoluteUrl(link.getAttribute("href"));
+      return href.match(/\/[a-z][a-z-]*\/(\d{10})(?:-[^/?#]*)?\/?(?:[?#]|$)/i)?.[1] === detailNpi;
+    })) candidateLinks.unshift(document.documentElement);
+    for (const link of candidateLinks) {
       const href = absoluteUrl(link.getAttribute("href"));
       let profileUrl;
       try { profileUrl = new URL(href); } catch { continue; }
@@ -1188,7 +1196,7 @@
       const npi = profileUrl.pathname.match(
         /^\/[a-z][a-z-]*\/(\d{10})(?:-[^/]*)?\/?$/i,
       )?.[1];
-      if (!npi || seen.has(npi)) continue;
+      if (!npi || seen.has(npi) || (detailNpi && npi !== detailNpi)) continue;
       let card = null;
       for (let node = link; node; node = node.parentElement) {
         if (visibleText(node).length > 3000) break;
@@ -1212,12 +1220,48 @@
         if (node === document.body) break;
       }
       if (!card) card = smallestContainer(link, /\bNPI Number\s*:/i);
-      const nameLink = card.querySelector?.("h2 a[href], h3 a[href]") || link;
+      const nameLink = card.querySelector?.("h1, h2 a[href], h3 a[href]") || link;
       const name = candidateName(card, nameLink, npi) || cleanProviderName(nameLink.textContent);
       if (!looksLikePersonName(name)) continue;
       const text = visibleText(card);
       const address = clean(text.match(/\bAddress\s*:\s*(.*?)(?=\s+(?:Phone|Fax)\s*:|$)/i)?.[1] || "", 500);
-      const specialty = clean(card.querySelector?.("h3 + p, h2 + p")?.textContent || specialtyFromPage(), 180);
+      const routeType = clean(profileUrl.pathname.split("/").filter(Boolean)[0], 80).replace(/-/g, " ");
+      const routeProfession = /^nurse$/i.test(routeType)
+        ? "Registered Nurse"
+        : /^doctor$/i.test(routeType)
+          ? "Physician"
+          : routeType.replace(/\b\w/g, (letter) => letter.toUpperCase());
+      const specialty = clean(
+        card.querySelector?.("h3 + p, h2 + p")?.textContent
+        || text.match(/\b(?:Specialty|Primary Taxonomy|Provider Type|Classification)\s*:\s*(.*?)(?=\s+(?:NPI|Address|Phone|Fax|License)\s*:|$)/i)?.[1]
+        || routeProfession
+        || specialtyFromPage(),
+        180,
+      );
+      const rawName = clean(nameLink?.textContent, 240);
+      const credentials = providerCredentials(rawName);
+      const licenses = unique(Array.from(text.matchAll(
+        /\b(?:License|License Number)\s*:\s*([A-Za-z0-9 .#-]{2,80})/gi,
+      )).map((match) => match[1]));
+      const profileDocument = detailNpi === npi ? {
+        kind: "public_professional_profile",
+        source_label: "NPI No.",
+        source_url: href,
+        headline: specialty || routeProfession,
+        summary: [routeProfession, specialty].filter(Boolean).join(" - "),
+        credentials,
+        specialties: specialty ? [specialty] : [],
+        subspecialties: [],
+        hospitals: [],
+        education: [],
+        certifications: [],
+        licenses,
+        languages: [],
+        years_experience: "",
+        npi,
+        address,
+        location: locationFromAddress(address),
+      } : null;
       seen.add(npi);
       profiles.push({
         name,
@@ -1227,8 +1271,10 @@
         roles: specialty ? [specialty] : [],
         employers: [],
         schools: [],
-        licenses: [],
-        certifications: [],
+        licenses,
+        certifications: credentials,
+        profile_document: profileDocument || undefined,
+        _detail_capture_ready: detailNpi ? Boolean(profileDocument) : undefined,
         source: PLATFORM.key,
         source_url: href,
         source_id: npi,
