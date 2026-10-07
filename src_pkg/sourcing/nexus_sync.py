@@ -48,6 +48,20 @@ _SPECIALTY_ALIASES: Mapping[str, tuple[str, ...]] = {
     "obstetrics and gynecology": ("Obstetrics & Gynecology",),
 }
 
+_ROLE_SPECIALTY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("Sterile Processing Tech (SPT)", re.compile(r"\bsterile\s+processing\s+tech(?:nician)?\b", re.I)),
+    ("Interventional Radiology Tech", re.compile(r"\binterventional\s+radiology\s+tech(?:nician|nologist)?\b", re.I)),
+    ("CT Tech", re.compile(r"\bct\s+tech(?:nician|nologist)?\b", re.I)),
+    ("MRI Tech", re.compile(r"\bmri\s+tech(?:nician|nologist)?\b", re.I)),
+    ("X-Ray Tech", re.compile(r"\bx[ -]?ray\s+tech(?:nician|nologist)?\b", re.I)),
+    ("X-Ray Tech", re.compile(r"\bradiologic\s+technolog(?:ist|y)\b", re.I)),
+    ("Long Term Acute Care (LTAC)", re.compile(r"\b(?:ltac|long\s+term\s+acute\s+care)\b", re.I)),
+    ("MedSurg / Tele", re.compile(r"\b(?:med(?:ical)?[ -]?surg(?:ical)?).{0,20}\btele(?:metry)?\b", re.I)),
+    ("MedSurg", re.compile(r"\b(?:med(?:ical)?[ -]?surg(?:ical)?)\b", re.I)),
+    ("Post-Partum", re.compile(r"\bpost[ -]?partum\b", re.I)),
+    ("Psychiatric-Mental Health", re.compile(r"\b(?:psychiatric[ -]?mental\s+health|mental\s+health\s+nurse\s+practitioner|pmhnp)\b", re.I)),
+)
+
 
 class NexusDeliveryError(RuntimeError):
     """Base class with a safe message suitable for an outbox status row."""
@@ -506,6 +520,55 @@ class NexusClient:
         rows = _rows(body, preferred=("records",))
         return [dict(row) for row in rows]
 
+    def get_candidate(self, candidate_id: str | int) -> dict[str, Any]:
+        """Return one Nexus candidate without retaining response diagnostics."""
+        response = self.request(
+            "GET",
+            f"/api/api-integration/v1/candidates/{quote(str(candidate_id), safe='')}",
+            operation="candidate lookup",
+        )
+        try:
+            body: Any = response.json()
+        except ValueError as exc:
+            raise NexusRetryableError(
+                "Nexus candidate lookup returned an unreadable response.",
+                operation="candidate_lookup",
+            ) from exc
+        current = body
+        for _ in range(3):
+            if not isinstance(current, Mapping):
+                break
+            nested = current.get("data") or current.get("candidate")
+            if not isinstance(nested, Mapping):
+                break
+            current = nested
+        if not isinstance(current, Mapping):
+            raise NexusRetryableError(
+                "Nexus candidate lookup did not return a candidate object.",
+                operation="candidate_lookup",
+            )
+        return dict(current)
+
+    def update_candidate_classification(
+        self,
+        candidate_id: str | int,
+        *,
+        profession_id: int,
+        specialty_id: int,
+    ) -> httpx.Response:
+        """Patch only the Nexus classification fields used by the repair tool."""
+        return self.request(
+            "PATCH",
+            f"/api/api-integration/v1/candidates/{quote(str(candidate_id), safe='')}",
+            operation="candidate classification update",
+            write=True,
+            json={
+                "professionIds": [int(profession_id)],
+                "specialtyIds": [int(specialty_id)],
+                "primarySpecialtyId": int(specialty_id),
+            },
+        )
+
     def get_master(self, name: str) -> list[dict[str, Any]]:
         if name not in self.MASTER_LISTS:
             raise NexusPermanentError(
@@ -736,11 +799,35 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
     candidate = payload.get("candidate") if isinstance(payload.get("candidate"), Mapping) else payload
     assert isinstance(candidate, Mapping)
     extraction = payload.get("resume_extraction")
-    accepted = (
+    accepted = dict(
         extraction.get("accepted")
         if isinstance(extraction, Mapping) and isinstance(extraction.get("accepted"), Mapping)
         else {}
     )
+    # Older stored extractions predate the accepted-specialties projection.
+    # Recover the same bounded vocabulary from their structured fields so a
+    # deployment immediately fixes queued records without reprocessing PDFs.
+    if isinstance(extraction, Mapping) and not accepted.get("specialties"):
+        fields = extraction.get("fields")
+        confidence = extraction.get("confidence")
+        conflicts = set(extraction.get("conflicts") or [])
+        extracted_specialties = (
+            fields.get("specialties") if isinstance(fields, Mapping) else None
+        )
+        try:
+            specialty_confidence = float(
+                confidence.get("specialties") if isinstance(confidence, Mapping) else 0
+            )
+        except (TypeError, ValueError):
+            specialty_confidence = 0
+        if (
+            isinstance(extracted_specialties, Sequence)
+            and not isinstance(extracted_specialties, (str, bytes))
+            and extracted_specialties
+            and "name" not in conflicts
+            and specialty_confidence >= 0.75
+        ):
+            accepted["specialties"] = list(extracted_specialties)[:20]
     if candidate.get("contacts_trusted") is not True:
         raise NexusPermanentError(
             "Candidate contacts are not approved for Nexus delivery.",
@@ -823,6 +910,11 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
         state = parsed_state
     if not country and len(parts) >= 3:
         country = parts[-1]
+    source_specialties = _candidate_specialties(candidate, {})
+    resume_specialties = _text_values([
+        *_text_values(accepted.get("specialty")),
+        *_text_values(accepted.get("specialties")),
+    ])
     return {
         "firstName": first_name,
         "middleName": middle_name,
@@ -839,7 +931,8 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
             or accepted.get("job_title")
             or ""
         ).strip(),
-        "specialties": _candidate_specialties(candidate, accepted),
+        "source_specialties": source_specialties,
+        "specialties": _text_values([*source_specialties, *resume_specialties]),
     }
 
 
@@ -888,7 +981,7 @@ _PROFESSION_ROLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("Medical Assistant", re.compile(r"\b(?:medical\s+assistant|cma)\b", re.I)),
     ("Patient Care Technician", re.compile(r"\b(?:patient\s+care\s+tech(?:nician)?|pct)\b", re.I)),
     ("Surgical Services", re.compile(
-        r"\b(?:surgical\s+(?:services|tech(?:nician|nologist)?)|operating\s+room\s+tech|cst)\b",
+        r"\b(?:surgical\s+(?:services|tech(?:nician|nologist)?)|sterile\s+processing|operating\s+room\s+tech|cst)\b",
         re.I,
     )),
     ("Respiratory Therapy", re.compile(r"\b(?:respiratory\s+therap(?:ist|y)|rrt)\b", re.I)),
@@ -898,7 +991,8 @@ _PROFESSION_ROLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"\b(?:speech\s+(?:language\s+)?(?:pathologist|therapy)|slp)\b", re.I,
     )),
     ("Radiology/Imaging", re.compile(
-        r"\b(?:radiolog(?:y|ic|ist)|imaging|sonograph(?:er|y)|x-?ray|ct\s+tech|mri\s+tech)\b",
+        r"\b(?:radiolog(?:y|ic|ist)|imaging|sonograph(?:er|y)|x-?ray|"
+        r"ct\s+tech(?:nician|nologist)?|mri\s+tech(?:nician|nologist)?)\b",
         re.I,
     )),
     ("Laboratory", re.compile(
@@ -929,6 +1023,17 @@ def _profession_labels(role: str) -> tuple[str, ...]:
     if taxonomy_labels:
         return taxonomy_labels
     return ("Unknown",)
+
+
+def _role_specialty_labels(
+    role: str, profession_values: Sequence[str],
+) -> tuple[str, ...]:
+    values = [
+        label for label, pattern in _ROLE_SPECIALTY_PATTERNS
+        if pattern.search(str(role or ""))
+    ]
+    values.extend(nexus_taxonomy.specialty_labels_for_role(role, profession_values))
+    return tuple(_text_values(values))
 
 
 def _exact_master_id(
@@ -1076,6 +1181,20 @@ def _unknown_classification(client: NexusClient) -> tuple[int, int]:
     return profession_id, specialty_id
 
 
+def _unknown_specialty_for_profession(client: NexusClient, profession_id: int) -> int:
+    """Keep a known profession while using its explicit Unknown specialty."""
+    return _preferred_master_id(
+        client,
+        "specialties",
+        ("Unknown",),
+        description="specialty",
+        extra_predicate=lambda row: (
+            not row.get("professionId")
+            or int(row["professionId"]) == int(profession_id)
+        ),
+    )
+
+
 def _build_profile(
     client: NexusClient,
     identity: Mapping[str, Any],
@@ -1199,8 +1318,18 @@ def _build_profile(
 
     role = str(identity.get("role") or "")
     actual_specialties = _text_values(identity.get("specialties"))
+    source_specialties = _text_values(identity.get("source_specialties"))
     initial_profession_values = (
         (profession_name,) if profession_name else _profession_labels(role)
+    )
+    role_specialties = _text_values(
+        _role_specialty_labels(role, initial_profession_values)
+    )
+    # Prefer explicit source fields, then the current role/title, then bounded
+    # resume-wide terms. Resume text can mention several historical units and
+    # must not override a more direct current classification.
+    actual_specialties = (
+        source_specialties or role_specialties or actual_specialties
     )
     taxonomy_row = nexus_taxonomy.classify(
         initial_profession_values, actual_specialties,
@@ -1259,9 +1388,17 @@ def _build_profile(
             except NexusPermanentError:
                 specialty_row = None
         if specialty_row is None:
-            profession_id, specialty_id = _unknown_classification(client)
-            profile["professionId"] = profession_id
-            profile["professionIds"] = [profession_id]
+            if profession_id:
+                try:
+                    specialty_id = _unknown_specialty_for_profession(client, profession_id)
+                except NexusPermanentError:
+                    profession_id, specialty_id = _unknown_classification(client)
+                    profile["professionId"] = profession_id
+                    profile["professionIds"] = [profession_id]
+            else:
+                profession_id, specialty_id = _unknown_classification(client)
+                profile["professionId"] = profession_id
+                profile["professionIds"] = [profession_id]
         else:
             specialty_id = int(_master_id(specialty_row, "specialties"))
             related_profession = specialty_row.get("professionId")
@@ -1296,9 +1433,17 @@ def _build_profile(
             # silently replaced.
             if specialty_name or not profession_inferred:
                 raise
-            profession_id, specialty_id = _unknown_classification(client)
-            profile["professionId"] = profession_id
-            profile["professionIds"] = [profession_id]
+            if profession_id:
+                try:
+                    specialty_id = _unknown_specialty_for_profession(client, profession_id)
+                except NexusPermanentError:
+                    profession_id, specialty_id = _unknown_classification(client)
+                    profile["professionId"] = profession_id
+                    profile["professionIds"] = [profession_id]
+            else:
+                profession_id, specialty_id = _unknown_classification(client)
+                profile["professionId"] = profession_id
+                profile["professionIds"] = [profession_id]
     if specialty_id:
         profile["specialtyId"] = specialty_id
         profile["primarySpecialtyId"] = specialty_id

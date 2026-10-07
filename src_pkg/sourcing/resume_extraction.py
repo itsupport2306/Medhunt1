@@ -435,9 +435,14 @@ def _fields(text: str) -> tuple[dict[str, Any], dict[str, float]]:
             values[key] = items
             confidence[key] = 0.72
 
+    acronym_specialties = {"ICU", "ER", "OR", "PACU", "L&D", "NICU"}
     specialties = _bounded_unique(
         specialty for specialty in _SPECIALTIES
-        if re.search(rf"\b{re.escape(specialty)}\b", text, re.I)
+        if re.search(
+            rf"\b{re.escape(specialty)}\b",
+            text,
+            0 if specialty in acronym_specialties else re.I,
+        )
     )
     if specialties:
         values["specialties"] = specialties
@@ -512,6 +517,18 @@ def _accepted(fields: Mapping[str, Any], confidence: Mapping[str, float], candid
     has_role = any(_clean(candidate.get(key)) for key in ("job_title", "role", "title"))
     if not has_role and fields.get("job_title") and float(confidence.get("job_title") or 0) >= config.RESUME_OCR_ROLE_CONFIDENCE:
         accepted["job_title"] = fields["job_title"]
+    # Resume specialties are bounded to the reviewed vocabulary in
+    # ``_SPECIALTIES``. Preserve them for ATS taxonomy resolution when the
+    # captured resume still belongs to the candidate; previously they stayed
+    # under ``fields`` and never reached Nexus.
+    resume_specialties = fields.get("specialties")
+    if (
+        isinstance(resume_specialties, list)
+        and resume_specialties
+        and "name" not in conflicts
+        and float(confidence.get("specialties") or 0) >= 0.75
+    ):
+        accepted["specialties"] = resume_specialties[:20]
     return accepted, sorted(set(conflicts))
 
 
