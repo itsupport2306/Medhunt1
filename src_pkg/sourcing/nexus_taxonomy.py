@@ -78,36 +78,6 @@ def specialty_labels(values: Sequence[str]) -> tuple[str, ...]:
     ))
 
 
-def specialty_labels_for_role(
-    role: str, profession_values: Sequence[str] = (),
-) -> tuple[str, ...]:
-    """Return approved specialties explicitly contained in a role/title.
-
-    The match is performed against the supplied Nexus taxonomy and optionally
-    restricted to the already inferred profession. Generic fallback labels
-    are excluded so ordinary words such as "manager" cannot create a false
-    clinical classification.
-    """
-    normalized_role = f" {normalize(role)} "
-    if not normalized_role.strip():
-        return ()
-    wanted_professions = {
-        normalize(value) for value in profession_values if normalize(value)
-    }
-    excluded = {"unknown", "other", "general", "contractor", "manager", "director"}
-    matches: list[str] = []
-    for item in rows():
-        specialty = normalize(item.specialty)
-        if not specialty or specialty in excluded:
-            continue
-        if wanted_professions and normalize(item.profession) not in wanted_professions:
-            continue
-        if f" {specialty} " in normalized_role:
-            matches.append(item.specialty)
-    matches.sort(key=lambda value: len(normalize(value)), reverse=True)
-    return tuple(dict.fromkeys(matches))
-
-
 def classify(
     profession_values: Sequence[str], specialty_values: Sequence[str],
 ) -> NexusTaxonomyRow | None:
@@ -148,5 +118,5 @@ def classify(
 
 __all__ = [
     "NexusTaxonomyRow", "classify", "profession_labels_for_role",
-    "professions", "rows", "specialty_labels", "specialty_labels_for_role",
+    "professions", "rows", "specialty_labels",
 ]

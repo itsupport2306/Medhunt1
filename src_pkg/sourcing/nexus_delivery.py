@@ -96,7 +96,7 @@ def queue_latest_resume_if_ready(candidate_id: int, user_id: str = "local") -> d
     )
 
 
-def _role(candidate: dict, extraction: dict | None = None) -> str:
+def _role(candidate: dict) -> str:
     """Choose a clinical role without mistaking an employer for a title.
 
     Platform markup occasionally labels the employer as both ``Headline`` and
@@ -106,14 +106,8 @@ def _role(candidate: dict, extraction: dict | None = None) -> str:
     last resort; Nexus will map an unrecognized value to its tenant-approved
     Unknown classification rather than guessing.
     """
-    accepted = (
-        extraction.get("accepted")
-        if isinstance(extraction, dict) and isinstance(extraction.get("accepted"), dict)
-        else {}
-    )
     values = [
         candidate.get("job_title"), candidate.get("role"), candidate.get("title"),
-        accepted.get("job_title"),
         *(source_context.extract(candidate).get("roles") or []),
     ]
     cleaned = []
@@ -155,6 +149,9 @@ def _payload(delivery: dict, candidate: dict, resume: dict) -> dict:
     latest = phone_policy.latest_phone_detail(projected)
     if latest:
         projected["latest_phone"] = latest["value"]
+    role = _role(candidate)
+    if role:
+        projected["job_title"] = role
     link = store.get_nexus_candidate_link(delivery.get("identity_key") or "")
     extraction_row = store.get_resume_extraction(
         resume.get("id"), candidate.get("id"),
@@ -163,9 +160,6 @@ def _payload(delivery: dict, candidate: dict, resume: dict) -> dict:
         extraction_row.get("extraction")
         if isinstance(extraction_row, dict) else {}
     )
-    role = _role(candidate, extraction)
-    if role:
-        projected["job_title"] = role
     return {
         "candidate": projected,
         # This is the local parser's bounded structured projection, never the
