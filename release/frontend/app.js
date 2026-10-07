@@ -2299,6 +2299,8 @@ function renderIndeedProfiles(scan = {}) {
           const originalIndex = indeedCandidates.indexOf(profile);
           const searchText = [profile.name, profile.location, profile.headline, ...(profile.roles || [])]
             .filter(Boolean).join(" ").toLowerCase();
+          const lookupResult = indeedLookupFor(profile);
+          const isEnriched = isIndeedMatch(lookupResult);
           const avatar = `<div class="capture-avatar" aria-hidden="true">${escapeHtml(initials(profile.name))}</div>`;
           const identity = `<button type="button" class="capture-identity" data-action="open-indeed-result" data-index="${originalIndex}" aria-disabled="${indeedResumeBatchState.active ? "true" : "false"}"${indeedResumeBatchState.active ? " disabled" : ""}>
             <strong>${escapeHtml(profile.name)}</strong>
@@ -2306,6 +2308,7 @@ function renderIndeedProfiles(scan = {}) {
               <span>${escapeHtml(profile.location || "Location not listed")}</span>
               ${profile.headline ? `<small>${escapeHtml(profile.headline)}</small>` : ""}
             </span>
+            ${isEnriched ? `<span class="candidate-enriched-badge">Enriched</span>` : ""}
           </button>`;
           const primary = hasResults
             ? `${avatar}${identity}`
@@ -2314,7 +2317,7 @@ function renderIndeedProfiles(scan = {}) {
                 ${avatar}
                 ${identity}
               </div>`;
-          return `<article class="capture-row${hasResults ? "" : " candidate-queue-card"}${indeedSelected.has(key) ? " selected" : ""}" data-profile-key="${escapeHtml(key)}" data-search="${escapeHtml(searchText)}">
+          return `<article class="capture-row${hasResults ? "" : " candidate-queue-card"}${indeedSelected.has(key) ? " selected" : ""}${isEnriched ? " is-enriched" : ""}" data-profile-key="${escapeHtml(key)}" data-search="${escapeHtml(searchText)}">
             ${primary}
             ${hasResults || isLookingUp ? `<div class="capture-result">${indeedResultStatus(profile)}</div>` : ""}
             ${hasResults ? nexusCandidateStatusMarkup(profile._candidateId) : ""}
@@ -2733,6 +2736,7 @@ async function scanIndeedCandidates(options = {}) {
   }
   try {
     const previousSelection = new Set(indeedSelected);
+    const previousLookupResults = new Map(indeedLookupState);
     const previouslySelectedAll = indeedCandidates.length > 0 &&
       previousSelection.size === indeedCandidates.length;
     const result = await sendSourcingMessage({
@@ -2793,7 +2797,9 @@ async function scanIndeedCandidates(options = {}) {
       scanContext?.key !== activeSourcingContextKey ||
       (quiet && indeedLookupInProgress)
     ) return;
-    activeSourcingPageUrl = result.page_url || activeSourcingPageUrl;
+    const scannedPageUrl = result.page_url || activeSourcingPageUrl;
+    const keepEnrichedHistory = Boolean(previousPageUrl && previousPageUrl === scannedPageUrl);
+    activeSourcingPageUrl = scannedPageUrl;
     const quality = globalThis.MedhuntProfileQuality?.sanitizeProfiles(
       result.profiles || [],
       {
@@ -2820,7 +2826,14 @@ async function scanIndeedCandidates(options = {}) {
       && (!previousPageUrl || previousPageUrl === (result.page_url || activeSourcingPageUrl));
     indeedCandidates = nextCandidates;
     if (!keepSelection) {
-      indeedLookupState = new Map();
+      indeedLookupState = keepEnrichedHistory
+        ? new Map(nextCandidates.flatMap((profile) => {
+          const previousResult = previousLookupResults.get(profile._selectionKey);
+          return isIndeedMatch(previousResult)
+            ? [[profile._selectionKey, previousResult]]
+            : [];
+        }))
+        : new Map();
       indeedLookupScope = new Set();
       indeedLookupProfiles = [];
     }
