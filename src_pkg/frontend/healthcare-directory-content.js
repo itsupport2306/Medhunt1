@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const ADAPTER_REVISION = "healthcare-directory-v10";
-  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST";
+  const ADAPTER_REVISION = "healthcare-directory-v9";
+  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST";
   if (window.__radixsolHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
   window.__radixsolHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
 
@@ -1177,43 +1177,13 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
-    for (const link of all("a[href]")) {
+    for (const link of all('a[href*="/npi/"]')) {
       const href = absoluteUrl(link.getAttribute("href"));
-      let profileUrl;
-      try { profileUrl = new URL(href); } catch { continue; }
-      if (!/^(?:www\.)?npino\.com$/i.test(profileUrl.hostname)) continue;
-      // NPINO uses singular provider routes such as /nurse/{NPI}-name and
-      // /doctor/{NPI}-name. Older pages used /npi/{NPI}. Accept all of those
-      // individual-provider routes while rejecting category/listing URLs.
-      const npi = profileUrl.pathname.match(
-        /^\/[a-z][a-z-]*\/(\d{10})(?:-[^/]*)?\/?$/i,
-      )?.[1];
+      const npi = href.match(/\/npi\/(\d{10})(?:-|\/|$)/i)?.[1] || npiFrom(link.textContent);
       if (!npi || seen.has(npi)) continue;
-      let card = null;
-      for (let node = link; node; node = node.parentElement) {
-        if (visibleText(node).length > 3000) break;
-        const otherProfile = all("a[href]", node).some((anchor) => {
-          const path = absoluteUrl(anchor.getAttribute("href"));
-          const linkedNpi = path.match(
-            /\/[a-z][a-z-]*\/(\d{10})(?:-[^/?#]*)?\/?(?:[?#]|$)/i,
-          )?.[1];
-          return linkedNpi && linkedNpi !== npi;
-        });
-        if (otherProfile) break;
-        const text = visibleText(node);
-        const hasThisNpi = text.includes(npi) || /\bNPI Number\s*:/i.test(text);
-        const hasPersonName = all(
-          "h1, h2, h3, h4, [itemprop='name'], .provider-name", node,
-        ).some((element) => looksLikePersonName(element.textContent));
-        if (hasThisNpi && hasPersonName) {
-          card = node;
-          if (node.matches?.("article, li, tr, [class*='card'], [class*='result']")) break;
-        }
-        if (node === document.body) break;
-      }
-      if (!card) card = smallestContainer(link, /\bNPI Number\s*:/i);
-      const nameLink = card.querySelector?.("h2 a[href], h3 a[href]") || link;
-      const name = candidateName(card, nameLink, npi) || cleanProviderName(nameLink.textContent);
+      const card = smallestContainer(link, /\bNPI Number\s*:/i);
+      const nameLink = card.querySelector?.('h2 a[href*="/npi/"], h3 a[href*="/npi/"]') || link;
+      const name = cleanProviderName(nameLink.textContent);
       if (!looksLikePersonName(name)) continue;
       const text = visibleText(card);
       const address = clean(text.match(/\bAddress\s*:\s*(.*?)(?=\s+(?:Phone|Fax)\s*:|$)/i)?.[1] || "", 500);
@@ -1375,11 +1345,9 @@
     const profile = lastProfiles[Number(index)];
     if (!profile) return { ok: false, error: "That displayed provider is no longer available." };
     const element = lastElements.get(profile.source_id);
-    const link = element?.matches?.("a[href]") ? element : (PLATFORM.key === "npino"
-      ? element?.querySelector?.("h2 a[href], h3 a[href]")
-      : element?.querySelector?.(
-        'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.information'
-      ));
+    const link = element?.matches?.("a[href]") ? element : element?.querySelector?.(
+      'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.information'
+    );
     if (link) {
       link.scrollIntoView({ block: "center", behavior: "auto" });
       link.click();

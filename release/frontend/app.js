@@ -2,7 +2,7 @@
 
 const $ = (selector, element = document) => element.querySelector(selector);
 const IS_EXTENSION = ["chrome-extension:", "moz-extension:"].includes(location.protocol);
-const DEFAULT_BACKEND = "https://medhunt1.onrender.com";
+const DEFAULT_BACKEND = "http://127.0.0.1:8091";
 const HOSTED_AUTH_REQUIRED = IS_EXTENSION && DEFAULT_BACKEND.startsWith("https://");
 const LOCAL_API_TOKEN = "__MEDHUNT_LOCAL_API_TOKEN__";
 const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";
@@ -11,10 +11,10 @@ const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
 let MAX_LOOKUP_SELECTION = 10;
-
-
-
-
+// A public-records lookup drives a real browser per person and cannot be
+// parallelised, so a bulk request would sit unanswered well past any sane
+// timeout. Send one candidate per request instead and let each row resolve as
+// its own answer arrives.
 const RECORD_LOOKUP_BATCH_SIZE = 1;
 const CONTACT_BATCH_TIMEOUT = 180000;
 const RECORD_LOOKUP_TIMEOUT = 190000;
@@ -26,7 +26,7 @@ const SOURCING_PLATFORMS = {
     contentScript: "indeed-content.js",
     mainScript: "inject.js",
     adapterRevision: "indeed-capture-v5",
-    adapterRequestType: "MEDHUNT_INDEED_V5_REQUEST",
+    adapterRequestType: "RADIXSOL_INDEED_V5_REQUEST",
     resumeCapture: true,
   },
   vivian: {
@@ -35,7 +35,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "vivian.com" || hostname.endsWith(".vivian.com"),
     contentScript: "platform-content.js",
     adapterRevision: "platform-capture-v2",
-    adapterRequestType: "MEDHUNT_PLATFORM_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_PLATFORM_V2_REQUEST",
     resumeCapture: false,
   },
   ziprecruiter: {
@@ -45,7 +45,7 @@ const SOURCING_PLATFORMS = {
     contentScript: "platform-content.js",
     mainScript: "platform-main.js",
     adapterRevision: "platform-capture-v2",
-    adapterRequestType: "MEDHUNT_PLATFORM_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_PLATFORM_V2_REQUEST",
     resumeCapture: false,
   },
   linkedin: {
@@ -54,7 +54,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "linkedin.com" || hostname.endsWith(".linkedin.com"),
     contentScript: "linkedin-content.js",
     adapterRevision: "linkedin-capture-v4",
-    adapterRequestType: "MEDHUNT_LINKEDIN_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_LINKEDIN_V2_REQUEST",
     resumeCapture: false,
     guidedPdfCapture: true,
     automaticPdfCapture: true,
@@ -66,7 +66,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "facebook.com" || hostname.endsWith(".facebook.com"),
     contentScript: "facebook-content.js",
     adapterRevision: "facebook-profile-v8",
-    adapterRequestType: "MEDHUNT_FACEBOOK_V8_REQUEST",
+    adapterRequestType: "RADIXSOL_FACEBOOK_V8_REQUEST",
     resumeCapture: false,
     guidedPdfCapture: false,
     singleProfile: true,
@@ -76,8 +76,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI No.",
     host: (hostname) => hostname === "npino.com" || hostname.endsWith(".npino.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   nysed: {
@@ -85,8 +85,8 @@ const SOURCING_PLATFORMS = {
     label: "NYSED",
     host: (hostname) => hostname === "eservices.nysed.gov",
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   npiprofile: {
@@ -94,8 +94,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI Profile",
     host: (hostname) => hostname === "npiprofile.com" || hostname.endsWith(".npiprofile.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   usnews: {
@@ -104,8 +104,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "health.usnews.com" &&
       /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   medifind: {
@@ -114,8 +114,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "medifind.com" || hostname.endsWith(".medifind.com"))
       && /^\/(?:doctors|specialty)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   commonspirit: {
@@ -124,8 +124,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "commonspirit.org" || hostname.endsWith(".commonspirit.org"))
       && /^\/(?:search|find-a-(?:doctor|location))(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
   sharecare: {
@@ -134,8 +134,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "providers.sharecare.com"
       && /^\/(?:find-a-doctor|doctor)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
 };
@@ -419,8 +419,9 @@ function normalizeBackendUrl(raw) {
   } catch {
     throw new Error("Enter a valid backend URL.");
   }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-    throw new Error("Use an HTTPS hosted backend.");
+  const local = parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname);
+  if ((!local && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+    throw new Error("Use HTTP on localhost for development or HTTPS for a hosted backend.");
   }
   return parsed.origin;
 }
@@ -439,9 +440,9 @@ function writeExtensionSetting(key, value) {
 
 async function loadBackendConfig() {
   if (!IS_EXTENSION) return;
-
-
-
+  // Chrome keeps extension storage across upgrades. Public packages have an
+  // HTTPS backend baked in, so an address saved by an older development build
+  // must never override the deployed service after upgrading.
   if (DEFAULT_BACKEND.startsWith("https://")) {
     apiBase = normalizeBackendUrl(DEFAULT_BACKEND);
     await writeExtensionSetting(BACKEND_STORAGE_KEY, apiBase);
@@ -529,20 +530,43 @@ function preferredMessagingPhone(record) {
   return contacts.find((item) => item.kind === "mobile") || contacts[0] || null;
 }
 
+function nexusBlockLabel(nexus) {
+  const destination = nexus?.target || (nexus?.state?.includes("ceipal") ? "ceipal" : "nexus");
+  if (destination === "ceipal") {
+    if (nexus?.state === "already_in_ceipal") return "Already present in Ceipal";
+    if (nexus?.state === "unavailable") return "Ceipal check unavailable · try again later";
+    return "Ceipal check needs review";
+  }
+  switch (nexus?.state) {
+    case "active_in_nexus": return "Already active in Nexus";
+    case "identity_unverified": return "Possible Nexus match · identity could not be confirmed";
+    case "identity_search_unavailable": return "Nexus check needs an email or wireless phone number";
+    case "unavailable": return "Nexus check unavailable · try again later";
+    default: return "Nexus check needs review";
+  }
+}
+
 function candidateCard(candidate) {
+  const nexus = candidate.ats_eligibility || candidate.nexus_eligibility || {};
+  const nexusBlocked = nexus.blocked === true;
   const email = Array.isArray(candidate.emails) ? candidate.emails[0] : "";
   const phoneContact = publicPhoneContacts(candidate)[0] || null;
   const messagingContact = preferredMessagingPhone(candidate);
   const phone = phoneContact?.value || "";
   const phoneLabel = publicPhoneLabel(phoneContact?.kind);
   const address = Array.isArray(candidate.addresses) ? candidate.addresses[0] : "";
-
-
+  // Candidate responses are already projected by the server; the browser does
+  // not receive or re-evaluate internal trust evidence.
   const successful = Boolean(email || phone);
   const stage = STAGES.includes(candidate.stage) ? candidate.stage : "new";
   const publicRecord = candidate.records_available
     ? `<span class="contact-origin">Public record</span>`
     : "";
+  const nexusNotice = nexusBlocked
+    ? `<div class="notice error"><strong>${nexusBlockLabel(nexus)}</strong>${nexus.status ? ` · ${escapeHtml(nexus.status)}` : ""}${nexus.recruiter ? ` · ${escapeHtml(nexus.recruiter)}` : ""}</div>`
+    : nexus.state === "created_in_ceipal"
+      ? `<div class="notice success"><strong>Parsed to Ceipal</strong></div>`
+      : "";
   const contact = successful
     ? `<div class="contact">
         ${publicRecord}
@@ -563,13 +587,14 @@ function candidateCard(candidate) {
       <div class="fit"><div class="number">${Number(candidate.fit_score) || 0}</div><div class="label">FIT</div></div>
     </div>
     <div><span class="${stageClass(stage)}">${escapeHtml(stage)}</span></div>
-      ${contact}
+    ${nexusNotice}
+    ${contact}
     <div class="candidate-actions">
-      ${IS_EXTENSION && messagingContact?.value ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
-      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}">Enrich</button>
+      ${IS_EXTENSION && messagingContact?.value && !nexusBlocked ? `<label class="muted small"><input type="checkbox" data-action="toggle-sms-candidate" data-candidate-id="${Number(candidate.id)}"${selectedSmsCandidates.has(Number(candidate.id)) ? " checked" : ""}> Select for bulk SMS</label>` : ""}
+      <button type="button" class="btn teal sm" data-action="enrich" data-id="${Number(candidate.id)}"${nexusBlocked ? " disabled" : ""}>Enrich</button>
       ${publicRecordButton(candidate.name, candidate.location, candidate.id)}
       <button type="button" class="btn sm" data-action="draft" data-id="${Number(candidate.id)}">Draft outreach</button>
-      ${messagingContact?.value ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(messagingContact.value)}">Send SMS</button>` : ""}
+      ${messagingContact?.value && !nexusBlocked ? `<button type="button" class="btn sm sms-button" data-action="compose-sms" data-candidate-id="${Number(candidate.id)}" data-candidate-name="${escapeHtml(candidate.name)}" data-phone="${escapeHtml(messagingContact.value)}">Send SMS</button>` : ""}
       <button type="button" class="btn ghost sm" data-action="move" data-id="${Number(candidate.id)}">Move ▾</button>
     </div>
   </article>`;
@@ -694,7 +719,18 @@ async function submitIntake() {
 
 async function enrichCandidate(id) {
   const result = await api(`/candidates/${id}/contact-lookup`, { method: "POST" });
-  notify(result.status === "found" ? "Candidate enriched." : "Contact lookup complete.");
+  const eligibility = result.ats_eligibility || result.nexus_eligibility || {};
+  const nexusState = eligibility.state;
+  const destination = result.ats_destination || eligibility.target || "nexus";
+  notify(result.status === "blocked"
+    ? destination === "ceipal"
+      ? nexusBlockLabel(eligibility)
+      : nexusState === "identity_search_unavailable"
+      ? "Cannot verify this candidate in Nexus until name and city/state search is supported."
+      : nexusState === "identity_unverified"
+        ? "Possible Nexus match needs identity review."
+        : "Candidate is already active in Nexus."
+    : "Candidate enriched.");
   await viewCandidates();
 }
 
@@ -838,16 +874,16 @@ function writeChromeSetting(key, value) {
 }
 
 async function readChromeSession(key) {
-
-
-
+  // Authentication is remembered only inside this installed Chrome profile.
+  // storage.local survives panel/browser restarts and extension upgrades, but
+  // unlike storage.sync it is not copied to another laptop or Google account.
   const persisted = await new Promise((resolve) => chrome.storage.local.get(
     [key], (result) => resolve(result[key]),
   ));
   if (persisted) return persisted;
 
-
-
+  // Migrate a still-valid session created by an older Medhunt build so the
+  // user does not have to enter one final email code after upgrading.
   if (!chrome.storage.session) return null;
   const legacy = await new Promise((resolve) => chrome.storage.session.get(
     [key], (result) => resolve(result[key]),
@@ -917,8 +953,8 @@ function releaseResumeBlobUrlLater(url, delay = 300000) {
 
 async function loadAuth() {
   if (!IS_EXTENSION) return;
-
-
+  // Read the remembered identity before contacting the hosted service. A
+  // Render cold start must not make a signed-in user appear logged out.
   authSession = await readChromeSession(AUTH_STORAGE_KEY) || null;
   try {
     const configured = await api("/auth/config", { timeout: 6000 });
@@ -928,9 +964,9 @@ async function loadAuth() {
       provider: configured?.provider || "healthboard",
     };
   } catch {
-
-
-
+    // A public package is always account-gated. Keep the login entry point
+    // visible when the capability check is temporarily unavailable so a
+    // network failure cannot silently downgrade the UI to local mode.
     authConfig = { enabled: HOSTED_AUTH_REQUIRED, provider: "healthboard" };
   }
   if (authConfig.enabled && authSession?.extension_token) {
@@ -939,8 +975,8 @@ async function loadAuth() {
       authSession.user = current.user;
       await writeChromeSession(AUTH_STORAGE_KEY, authSession);
     } catch (error) {
-
-
+      // Only an explicit authentication rejection invalidates the remembered
+      // login. Timeouts, Render cold starts, and temporary 5xx responses do not.
       if ([401, 403].includes(Number(error?.status))) {
         authSession = null;
         await writeChromeSession(AUTH_STORAGE_KEY, null);
@@ -1145,7 +1181,7 @@ function sourcingPageEligibility(platform, value) {
     return { eligible, reason: eligible ? "" : "linkedin-route" };
   }
   if (platform.key === "facebook") {
-    const eligible = Boolean(globalThis.MedhuntProfileQuality?.validProfileUrl(url.href, "facebook"));
+    const eligible = Boolean(globalThis.RadixsolProfileQuality?.validProfileUrl(url.href, "facebook"));
     return { eligible, reason: eligible ? "" : "facebook-route" };
   }
   return { eligible: true, reason: "" };
@@ -1237,9 +1273,9 @@ async function sendSourcingMessage(message, findExisting = false, expectedContex
     : message;
   try {
     const response = await sendTabMessage(tab.id, message);
-
-
-
+    // An unpacked extension reload does not replace a listener already living
+    // in an open Facebook tab.  Upgrade it in place when its adapter revision
+    // differs, including when the stale listener returned an extraction error.
     if (platform.adapterRevision && response?.adapter_revision !== platform.adapterRevision) {
       await injectPlatformScript();
       const upgraded = await sendTabMessage(tab.id, currentAdapterMessage);
@@ -1285,11 +1321,11 @@ async function sendIndeedResumeMessage(message, sourceTabId = 0) {
 }
 
 async function captureIndeedProfile() {
-  const result = await sendSourcingMessage({ type: "MEDHUNT_CAPTURE_PLATFORM_PROFILE" });
+  const result = await sendSourcingMessage({ type: "RADIXSOL_CAPTURE_PLATFORM_PROFILE" });
   if (!result?.ok) {
     throw new Error(result?.error || `The visible ${activeSourcingPlatform.label} profile could not be read.`);
   }
-  const checked = globalThis.MedhuntProfileQuality?.sanitizeProfile(result.profile, {
+  const checked = globalThis.RadixsolProfileQuality?.sanitizeProfile(result.profile, {
     platform: activeSourcingPlatform.key,
     pageUrl: result.page_url || activeSourcingPageUrl,
     singleProfile: true,
@@ -1363,8 +1399,8 @@ async function importIndeedProfile() {
   notify(`${imported.imported ? "Imported" : "Opened existing"} ${activeSourcingPlatform.label} candidate with ${contacts} contact result${contacts === 1 ? "" : "s"}.`);
 }
 
-
-
+// ---- public-record lookup ----
+// Provider selection, credentials, and trust decisions stay in the backend.
 function publicRecordAvailable() {
   return Boolean(backendHealth?.records_lookup?.enabled);
 }
@@ -1447,7 +1483,7 @@ async function captureProfessionalProfileInBackground(profile, timeoutMs = 45000
 
     const message = {
       type: platform.adapterRequestType,
-      original_type: "MEDHUNT_CAPTURE_PLATFORM_PROFILE",
+      original_type: "RADIXSOL_CAPTURE_PLATFORM_PROFILE",
     };
     let lastError = null;
     while (Date.now() < deadline) {
@@ -1457,8 +1493,8 @@ async function captureProfessionalProfileInBackground(profile, timeoutMs = 45000
         lastError = new Error(response?.error || `${platform.label} is still loading the profile details.`);
       } catch (error) {
         lastError = error;
-
-
+        // The content script can attach just after tabs.status becomes
+        // complete. Inject it once if the first message arrives too early.
         try {
           await chrome.scripting.executeScript({ target: { tabId }, files: ["healthcare-directory-content.js"] });
         } catch { /* The next poll will report a useful timeout if the tab closed. */ }
@@ -1504,10 +1540,10 @@ function professionalProfileImportPayload(profile) {
   };
 }
 
-
-
-
-
+// Keep source-declared specialty labels separate from generic skills. This
+// accepts structured adapter fields and explicit Specialty: notes emitted by
+// healthcare-directory adapters, without guessing that an arbitrary skill or
+// headline is a recruiting-system specialty.
 function profileSpecialties(profile, list) {
   const values = [profile?.specialty, ...(Array.isArray(profile?.specialties) ? profile.specialties : [])];
   for (const line of String(profile?.notes || "").split(/\r?\n/)) {
@@ -1531,8 +1567,8 @@ async function enrichProfessionalProfileAndResume(profile) {
     throw new Error(`${platform?.label || "The profile"} did not contain professional details.`);
   }
 
-
-
+  // Keep the selection identity/source id from the search card so the rich
+  // profile updates the existing candidate instead of creating a duplicate.
   Object.assign(profile, captured, {
     source: profile.source,
     source_id: profile.source_id || captured.source_id,
@@ -1672,8 +1708,8 @@ function sequentialLookupMode() {
 }
 
 function lookupDurationEstimate(count) {
-
-
+  // The backend reports the API's own 30-90 second range; quote the midpoint
+  // so a 45-profile selection is not started expecting a quick answer.
   const [fast = 30, slow = 90] = backendHealth?.records_lookup?.typical_seconds || [];
   const minutes = Math.max(1, Math.round((count * ((fast + slow) / 2)) / 60));
   return `${minutes} minute${minutes === 1 ? "" : "s"}`;
@@ -1873,7 +1909,7 @@ async function publicRecordLookup({ name, location = "", candidateId = 0, refres
         candidate_id: Number(candidateId) || null,
         refresh: Boolean(refresh),
       }),
-
+      // One uncached search drives a real browser on the Hub side.
       timeout: 190000,
     });
   } catch (error) {
@@ -1884,8 +1920,8 @@ async function publicRecordLookup({ name, location = "", candidateId = 0, refres
 }
 
 async function publicRecordFromButton(button, refresh = false) {
-
-
+  // A lookup started from the capture review sheet replaces that sheet, so
+  // remember the reviewed profile and offer a way back to it.
   publicRecordReturnProfile = activeIndeedProfile || null;
   await publicRecordLookup({
     name: button.dataset.qsName,
@@ -1976,6 +2012,14 @@ function indeedResultStatus(profile) {
   if (result.status === "looking_up" || result.status === "processing") {
     return `<span class="lookup-searching"><i aria-hidden="true"></i>Checking contact${result.request_id ? ` Â· ${escapeHtml(result.request_id)}` : ""}</span>`;
   }
+  if (result.status === "blocked") {
+    const nexus = result.ats_eligibility || result.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    return `<div class="lookup-outcome">
+      <span class="lookup-state lookup-error"><i aria-hidden="true"></i>${nexusBlockLabel(nexus)}</span>
+      ${details ? `<span class="lookup-detail">${escapeHtml(details)}</span>` : ""}
+    </div>`;
+  }
   if (isIndeedMatch(result)) {
     const emails = result.emails || [];
     const phoneContacts = publicPhoneContacts(result);
@@ -1986,7 +2030,9 @@ function indeedResultStatus(profile) {
     const shownEmails = emails.slice(0, ROW_CONTACT_LIMIT);
     const shownPhones = phoneContacts.slice(0, ROW_CONTACT_LIMIT);
     const messagingPhone = preferredMessagingPhone(result);
-    const parsedNotice = `<span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>`;
+    const parsedNotice = result.ats_eligibility?.state === "created_in_ceipal"
+      ? `<span class="lookup-state match"><i aria-hidden="true"></i>Parsed to Ceipal</span>`
+      : `<span class="lookup-state match"><i aria-hidden="true"></i>Contact ready</span>`;
     return `<div class="lookup-contact">
       ${parsedNotice}
       ${shownEmails.map((email) => `<span class="lookup-value">${escapeHtml(email)}</span>`).join("")}
@@ -2044,8 +2090,8 @@ function linkedinPdfControl(profile, index) {
 
 function indeedFilteredProfiles() {
   const inLookupView = indeedScanState.phase === "results";
-
-
+  // Render from the immutable selection snapshot. Indeed can replace or
+  // virtualize its result-card DOM while a backend lookup is in flight.
   const sourceProfiles = inLookupView && indeedLookupProfiles.length
     ? indeedLookupProfiles
     : indeedCandidates;
@@ -2498,10 +2544,10 @@ async function ensureProfessionalProfileResume(profile) {
         resume_error: "",
       });
       updateIndeedLookupProgressUi(profile);
-
-
-
-
+      // Keep the generated public-profile PDF in the backend/R2 as the
+      // authoritative copy, and also save a local copy for the recruiter.
+      // A browser download failure must not turn a successfully stored resume
+      // into a false backend failure.
       if (IS_EXTENSION) {
         await saveStoredResumeDownload(profile, candidateId, attached.resume).catch(() => {});
       }
@@ -2565,10 +2611,10 @@ async function performDisplayedIndeedSave(searchUrl) {
   if (contextKey === activeSourcingContextKey) {
     showIndeedSaveStatus("saving", `Saving ${snapshot.length} displayed profiles...`);
   }
-
-
-
-
+  // Send only the versioned profile-import contract. Content scripts may add
+  // adapter-only fields, and older platform pages can expose unexpectedly
+  // large evidence arrays. Neither should invalidate an otherwise usable
+  // batch before the backend can assign candidate IDs.
   const boundedText = (value, limit) => String(value ?? "").trim().slice(0, limit);
   const boundedList = (values, limit, maxChars = 240) => {
     const output = [];
@@ -2737,8 +2783,8 @@ async function scanIndeedCandidates(options = {}) {
       previousSelection.size === indeedCandidates.length;
     const result = await sendSourcingMessage({
       type: quiet
-        ? "MEDHUNT_LIST_PLATFORM_CANDIDATES"
-        : "MEDHUNT_SCAN_PLATFORM_CANDIDATES",
+        ? "RADIXSOL_LIST_PLATFORM_CANDIDATES"
+        : "RADIXSOL_SCAN_PLATFORM_CANDIDATES",
     }, false, scanContext);
     if (IS_EXTENSION && scanContext) {
       const [latestTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -2750,9 +2796,9 @@ async function scanIndeedCandidates(options = {}) {
     }
     if (!result?.ok && result?.error_code === "FACEBOOK_PROFILE_LOCKED") {
       if (scanGeneration !== indeedScanGeneration || (quiet && indeedLookupInProgress)) return;
-
-
-
+      // A Facebook SPA can replace a previously captured public profile with a
+      // locked one. Clear every prior selection before rendering the skip so
+      // stale candidates cannot be saved or enriched.
       clearCapturedProfileState("locked");
       activeSourcingPageUrl = result.page_url || activeSourcingPageUrl;
       renderSourcingStatus(
@@ -2794,7 +2840,7 @@ async function scanIndeedCandidates(options = {}) {
       (quiet && indeedLookupInProgress)
     ) return;
     activeSourcingPageUrl = result.page_url || activeSourcingPageUrl;
-    const quality = globalThis.MedhuntProfileQuality?.sanitizeProfiles(
+    const quality = globalThis.RadixsolProfileQuality?.sanitizeProfiles(
       result.profiles || [],
       {
         platform: activeSourcingPlatform.key,
@@ -2852,8 +2898,8 @@ async function scanIndeedCandidates(options = {}) {
       );
       return;
     }
-
-
+    // Detection stays inside the browser. Candidate data is imported only
+    // after the recruiter explicitly starts a lookup or resume capture.
     renderIndeedProfiles(result);
   } catch (error) {
     if (scanContext?.key && scanContext.key !== activeSourcingContextKey) return;
@@ -2911,10 +2957,10 @@ async function synchronizeActiveSourcingTab(reason = "changed") {
     };
     return;
   }
-
-
-
-
+  // Opening the browser's Downloads bubble can produce a duplicate focus
+  // event, while opening the full Downloads page temporarily activates a
+  // chrome:// or edge:// tab. Neither action changes the sourcing context and
+  // neither may clear results or start another scan.
   if (isBrowserDownloadSurface(tab?.url || "")) return;
   const platform = tab?.id ? platformForUrl(tab.url) : null;
   if (platform?.key === "indeed" && isProtectedIndeedResumeNavigation(tab?.id, tab?.url)) return;
@@ -2937,10 +2983,10 @@ async function synchronizeActiveSourcingTab(reason = "changed") {
     return;
   }
 
-
-
-
-
+  // Focus changes and closing a browser-internal Downloads tab are passive.
+  // Chrome reports the now-active source tab as "removed" and Indeed may have
+  // added a transient candidate/drawer parameter while creating the PDF. Keep
+  // the completed workbench intact even when the download remains unfinished.
   if (isPassiveSourcingContextEvent(reason, tab, platform)) return;
 
   const eligibility = sourcingPageEligibility(platform, tab.url || "");
@@ -2983,7 +3029,7 @@ function scheduleActiveSourcingSync(reason = "changed", delay = 180) {
 
 if (IS_EXTENSION) {
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (message?.type === "MEDHUNT_ACTIVE_TAB_CHANGED") {
+    if (message?.type === "RADIXSOL_ACTIVE_TAB_CHANGED") {
       if (sourcingWorkInProgress()) pendingSourcingContext = message;
       else if (
         message.platform === "indeed" &&
@@ -2992,11 +3038,11 @@ if (IS_EXTENSION) {
       else scheduleActiveSourcingSync(message.reason || "changed", message.status === "complete" ? 120 : 240);
       return false;
     }
-    if (message?.type === "MEDHUNT_RESUME_DOWNLOADED") {
+    if (message?.type === "RADIXSOL_RESUME_DOWNLOADED") {
       handleDownloadedResume(message);
       return false;
     }
-    if (message?.type === "MEDHUNT_LINKEDIN_PDF_CAPTURE_STARTED") {
+    if (message?.type === "RADIXSOL_LINKEDIN_PDF_CAPTURE_STARTED") {
       const profile = indeedCandidates.find(
         (candidate) => Number(candidate._candidateId) === Number(message.candidateId),
       );
@@ -3011,7 +3057,7 @@ if (IS_EXTENSION) {
       }
       return false;
     }
-    if (message?.type === "MEDHUNT_LINKEDIN_PDF_CAPTURE_FAILED") {
+    if (message?.type === "RADIXSOL_LINKEDIN_PDF_CAPTURE_FAILED") {
       const profile = indeedCandidates.find(
         (candidate) => Number(candidate._candidateId) === Number(message.candidateId),
       );
@@ -3034,7 +3080,7 @@ if (IS_EXTENSION) {
       return false;
     }
     if (
-      ["MEDHUNT_PLATFORM_SCAN_PROGRESS", "MEDHUNT_PLATFORM_RESULTS_CHANGED"].includes(message?.type) &&
+      ["RADIXSOL_PLATFORM_SCAN_PROGRESS", "RADIXSOL_PLATFORM_RESULTS_CHANGED"].includes(message?.type) &&
       sender?.tab?.id && (
         sender.tab.active === false || Number(sender.tab.id) !== Number(activeSourcingTabId)
       )
@@ -3048,7 +3094,7 @@ if (IS_EXTENSION) {
         )
       )
     ) return false;
-    if (message?.type === "MEDHUNT_PLATFORM_SCAN_PROGRESS") {
+    if (message?.type === "RADIXSOL_PLATFORM_SCAN_PROGRESS") {
       if (message.platform && message.platform !== activeSourcingPlatform?.key) return false;
       indeedScanState = {
         phase: "scanning",
@@ -3057,10 +3103,10 @@ if (IS_EXTENSION) {
       };
       if (!$(".scan-view")) renderIndeedScanning();
       updateSourceHeaderProgressUi();
-
-
-
-
+      // Some directory pages finish their progressive scan before the side
+      // panel receives the final response. Refresh from the page snapshot as
+      // soon as the reported total is reached so results do not require a
+      // panel close/reopen cycle.
       if (
         Number(message.total) > 0
         && Number(message.found) >= Number(message.total)
@@ -3074,7 +3120,7 @@ if (IS_EXTENSION) {
       }
       return false;
     }
-    if (message?.type !== "MEDHUNT_PLATFORM_RESULTS_CHANGED") return false;
+    if (message?.type !== "RADIXSOL_PLATFORM_RESULTS_CHANGED") return false;
     if (message.platform && message.platform !== activeSourcingPlatform?.key) return false;
     const facebookIdentityChanged = message.platform === "facebook" && message.identity_changed === true;
     if (facebookIdentityChanged) {
@@ -3083,10 +3129,10 @@ if (IS_EXTENSION) {
       activeSourcingPageUrl = message.page_url || "";
       if (activeView === "indeed") renderIndeedScanning();
     }
-
-
-
-
+    // Opening a candidate from a LinkedIn People batch navigates the same tab
+    // to /in/. Keep the captured batch in the side panel so the recruiter can
+    // return to it, enrich it, and use the exact-profile PDF action. A manual
+    // refresh still replaces it with the currently open individual profile.
     if (
       message.platform === "linkedin" &&
       isLinkedinPeopleSearchUrl(activeSourcingPageUrl) &&
@@ -3112,13 +3158,13 @@ async function openIndeedResult(index) {
   const profile = indeedCandidates[index];
   if (!profile) throw new Error("That displayed candidate is no longer available.");
   const result = await sendSourcingMessage({
-    type: "MEDHUNT_OPEN_PLATFORM_CANDIDATE",
+    type: "RADIXSOL_OPEN_PLATFORM_CANDIDATE",
     index: profile.result_index ?? index,
   });
   if (!result?.ok) throw new Error(result?.error || `${activeSourcingPlatform.label} could not open that candidate.`);
   if (profile._candidateId && activeSourcingPlatform.resumeCapture) {
     await sendExtensionMessage({
-      type: "MEDHUNT_SET_ACTIVE_CANDIDATE",
+      type: "RADIXSOL_SET_ACTIVE_CANDIDATE",
       candidateId: profile._candidateId,
       name: profile.name,
       sourceId: profile.source_id || "",
@@ -3159,7 +3205,7 @@ async function captureLinkedinPdf(index) {
   }
 
   const armed = await sendExtensionMessage({
-    type: "MEDHUNT_ARM_LINKEDIN_PDF_CAPTURE",
+    type: "RADIXSOL_ARM_LINKEDIN_PDF_CAPTURE",
     tabId: tab.id,
     candidateId: profile._candidateId,
     name: profile.name,
@@ -3170,7 +3216,7 @@ async function captureLinkedinPdf(index) {
   let guide = null;
   const guideRequest = {
     type: SOURCING_PLATFORMS.linkedin.adapterRequestType,
-    original_type: "MEDHUNT_AUTO_LINKEDIN_PDF",
+    original_type: "RADIXSOL_AUTO_LINKEDIN_PDF",
   };
   try {
     guide = await sendTabMessage(tab.id, guideRequest);
@@ -3182,7 +3228,7 @@ async function captureLinkedinPdf(index) {
     guide = await sendTabMessage(tab.id, guideRequest);
   }
   if (!guide?.ok) {
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     throw new Error(guide?.error || "LinkedIn did not make Save to PDF available.");
   }
   await chrome.tabs.update(tab.id, { active: true });
@@ -3196,7 +3242,7 @@ async function captureLinkedinPdf(index) {
   const candidateId = Number(profile._candidateId);
   clearTimeout(linkedinPdfCaptureTimers.get(candidateId));
   linkedinPdfCaptureTimers.set(candidateId, setTimeout(async () => {
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     const latest = indeedLookupFor(profile);
     if (["armed", "downloading"].includes(latest.resume_status)) {
       indeedLookupState.set(profile._selectionKey, {
@@ -3229,7 +3275,7 @@ async function captureLinkedinPdf(index) {
 }
 
 async function cancelLinkedinPdf(index) {
-  await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" });
+  await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" });
   const profile = indeedCandidates[index];
   if (profile) {
     clearTimeout(linkedinPdfCaptureTimers.get(Number(profile._candidateId)));
@@ -3279,8 +3325,8 @@ async function lookupSelectedIndeedCandidates() {
   stopNexusDeliveryPolling();
   nexusDeliverySummary = null;
   nexusDeliveryCandidateIds = [];
-
-
+  // Invalidate any quiet scan that was already awaiting a content-script
+  // response before the recruiter pressed Lookup.
   indeedScanGeneration += 1;
   try {
     if (!backendHealth) await refreshHealth();
@@ -3312,7 +3358,7 @@ async function lookupSelectedIndeedCandidates() {
     ? globalThis.crypto.randomUUID().replaceAll("-", "")
     : `lookup_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   for (const profile of profiles) {
-
+    // Hide prior snapshots while the server checks the current record.
     const previous = indeedLookupFor(profile);
     indeedLookupState.set(profile._selectionKey, {
       status: "looking_up",
@@ -3632,7 +3678,7 @@ async function handleDownloadedResume(message) {
     waiter?.resolve(resume);
     if (eventId) {
       await sendExtensionMessage({
-        type: "MEDHUNT_ACK_RESUME_EVENT",
+        type: "RADIXSOL_ACK_RESUME_EVENT",
         event_id: eventId,
       }).catch(() => {});
     }
@@ -3664,7 +3710,7 @@ async function handleDownloadedResume(message) {
 async function processPendingResumeEvents() {
   if (!IS_EXTENSION || !backendHealth) return;
   const pending = await sendExtensionMessage({
-    type: "MEDHUNT_GET_PENDING_RESUME_EVENTS",
+    type: "RADIXSOL_GET_PENDING_RESUME_EVENTS",
   }).catch(() => ({ events: [] }));
   for (const event of pending?.events || []) await handleDownloadedResume(event);
 }
@@ -3727,8 +3773,8 @@ async function recoverStoredResume(candidateId, uploadStartedAt, timeoutMs = 120
         };
       }
     } catch {
-
-
+      // The original request can still be finishing in the backend. Keep
+      // polling until its resume metadata is committed.
     }
     await wait(2500);
   }
@@ -3772,7 +3818,7 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
     await wait(650);
 
     const armed = await sendExtensionMessage({
-      type: "MEDHUNT_ARM_LINKEDIN_PDF_CAPTURE",
+      type: "RADIXSOL_ARM_LINKEDIN_PDF_CAPTURE",
       tabId: Number(sourceTabId),
       candidateId,
       name: profile.name,
@@ -3781,14 +3827,14 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
     if (!armed?.ok) throw new Error(armed?.error || "LinkedIn PDF capture could not start.");
 
     completion = linkedinResumeCompletion(candidateId);
-    const started = await sendLinkedinPdfMessage(sourceTabId, "MEDHUNT_AUTO_LINKEDIN_PDF");
+    const started = await sendLinkedinPdfMessage(sourceTabId, "RADIXSOL_AUTO_LINKEDIN_PDF");
     if (!started?.ok) throw new Error(started?.error || "LinkedIn did not make Save to PDF available.");
     const resume = await completion.promise;
     await saveStoredResumeDownload(profile, candidateId, resume).catch(() => {});
     return true;
   } catch (error) {
     completion?.cancel(error);
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     const latest = indeedLookupFor(profile);
     indeedLookupState.set(profile._selectionKey, {
       ...latest,
@@ -3941,9 +3987,9 @@ function startIndeedResumeBatch(profiles) {
         ...indeedResumeBatchState,
         active: false,
       };
-
-
-
+      // Indeed can emit delayed URL/load events after its download menu has
+      // completed. Keep those same-tab automation events from replacing the
+      // stable results list with a temporary zero-card scan.
       indeedResumeNavigationGrace = {
         sourceTabId: Number(completed.sourceTabId),
         sourcePageUrl: String(completed.sourcePageUrl || ""),
@@ -4008,13 +4054,13 @@ async function downloadMatchedIndeedResume(profile) {
       updateIndeedLookupProgressUi(profile);
       return true;
     }
-
-
-
-    await sendExtensionMessage({ type: "MEDHUNT_CLEAR_ACTIVE_CANDIDATE" });
+    // Automatic capture stores the bytes returned by the proven MAIN-world
+    // hook. Clear the older file-path tracker so a normal Indeed download does
+    // not create a duplicate resume record in parallel.
+    await sendExtensionMessage({ type: "RADIXSOL_CLEAR_ACTIVE_CANDIDATE" });
 
     const captured = await sendIndeedResumeMessage({
-      type: "MEDHUNT_DOWNLOAD_INDEED_RESUME",
+      type: "RADIXSOL_DOWNLOAD_INDEED_RESUME",
       index: profile.result_index,
       expectedName: profile.name,
     }, profile._sourceTabId);
@@ -4057,8 +4103,8 @@ async function downloadMatchedIndeedResume(profile) {
       resume_error: "",
     });
     updateIndeedLookupProgressUi(profile);
-
-
+    // The central copy is authoritative. A blocked local browser download must
+    // not turn an already stored resume into a false failure state.
     await saveStoredResumeDownload(profile, candidateId, attached.resume).catch(() => {});
     return true;
   } catch (error) {
@@ -4192,6 +4238,11 @@ async function copyDraft() {
 async function showSmsComposer(candidateId, candidateName, phone) {
   if (!candidateId || !phone) throw new Error("A verified phone number is required.");
   const preview = await api("/candidates/" + Number(candidateId) + "/sms-preview?phone=" + encodeURIComponent(phone));
+  if (preview.ats_blocked || preview.nexus_blocked) {
+    const nexus = preview.ats_eligibility || preview.nexus_eligibility || {};
+    const details = [nexus.status, nexus.recruiter].filter(Boolean).join(" · ");
+    throw new Error(nexusBlockLabel(nexus) + (details ? " (" + details + ")." : "."));
+  }
   if (preview.opted_out) throw new Error("This number has opted out and cannot be messaged.");
   if (preview.already_contacted) throw new Error("This candidate has already received SMS outreach.");
   const selectedPhone = preview.phone || phone;
@@ -4264,9 +4315,9 @@ async function showBulkSmsComposer() {
     entries.push({
       candidateId: Number(candidate.id), name: String(candidate.name || "Candidate"),
       phone: preview.phone || candidatePhone,
-      message: "Hello " + firstName + ", This is Brian from Medhunt. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
-      blocked: Boolean(preview.opted_out || preview.already_contacted || preview.error),
-      reason: preview.error || (preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
+      message: "Hello " + firstName + ", This is Brian from Radixsol. We have a Job title-Specialty opening in City, state, 13/26 weeks and Quick Offers, Would you be interested in more details?",
+      blocked: Boolean(preview.ats_blocked || preview.nexus_blocked || preview.opted_out || preview.already_contacted || preview.error),
+      reason: preview.error || (preview.ats_blocked || preview.nexus_blocked ? nexusBlockLabel(preview.ats_eligibility || preview.nexus_eligibility || {}) : preview.opted_out ? "Opted out" : preview.already_contacted ? "Already contacted" : ""),
     });
   }
   if (!entries.length) throw new Error("The selected candidates have no verified phone numbers.");
@@ -4730,9 +4781,9 @@ async function startExtensionWorkspace() {
     activeView = "indeed";
     privacyConsent = (await readChromeSetting(PRIVACY_CONSENT_KEY)) === true;
     if (!privacyConsent) {
-
-
-
+      // Load the public auth configuration before showing first-run access.
+      // When Healthcareboard auth is enabled, sign-in and the data-use
+      // acknowledgement live in one compact entry screen.
       await loadAuth();
       renderSourcingStatus(
         "Review required",
