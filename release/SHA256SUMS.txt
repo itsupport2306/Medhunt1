@@ -1,2 +1,2 @@
-1e1f6c69de8542fe9dc827d7d93100662ea6b176a5aba83fdaadf08dcecb27a5  medhunt-chrome-store-3.37.2.zip
-1e1f6c69de8542fe9dc827d7d93100662ea6b176a5aba83fdaadf08dcecb27a5  medhunt-chrome-store.zip
+c062ad342baef06c163f4d479314a183b19271ef99e0988b345e24294ed0eb7d  medhunt-chrome-store-3.37.1.zip
+c062ad342baef06c163f4d479314a183b19271ef99e0988b345e24294ed0eb7d  medhunt-chrome-store.zip
