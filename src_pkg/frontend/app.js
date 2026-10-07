@@ -76,8 +76,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI No.",
     host: (hostname) => hostname === "npino.com" || hostname.endsWith(".npino.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   nysed: {
@@ -85,8 +85,8 @@ const SOURCING_PLATFORMS = {
     label: "NYSED",
     host: (hostname) => hostname === "eservices.nysed.gov",
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   npiprofile: {
@@ -94,8 +94,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI Profile",
     host: (hostname) => hostname === "npiprofile.com" || hostname.endsWith(".npiprofile.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   usnews: {
@@ -104,8 +104,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "health.usnews.com" &&
       /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   medifind: {
@@ -114,8 +114,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "medifind.com" || hostname.endsWith(".medifind.com"))
       && /^\/(?:doctors|specialty)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   commonspirit: {
@@ -124,8 +124,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "commonspirit.org" || hostname.endsWith(".commonspirit.org"))
       && /^\/(?:search|find-a-(?:doctor|location))(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   sharecare: {
@@ -134,12 +134,12 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "providers.sharecare.com"
       && /^\/(?:find-a-doctor|doctor)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v11",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V11_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
 };
-const PROFESSIONAL_PROFILE_SOURCES = new Set(["npino", "usnews", "medifind", "commonspirit", "sharecare"]);
+const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare"]);
 
 let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
@@ -2456,7 +2456,7 @@ async function ensureProfessionalProfileResume(profile) {
   const candidateId = Number(profile?._candidateId);
   const documentProfile = profile?.profile_document;
   if (
-    !PROFESSIONAL_PROFILE_SOURCES.has(profile?.source) || !candidateId
+    !["usnews", "medifind", "commonspirit", "sharecare"].includes(profile?.source) || !candidateId
     || !hasCompleteIndeedContact(indeedLookupFor(profile))
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;

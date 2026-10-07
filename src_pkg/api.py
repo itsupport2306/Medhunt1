@@ -2162,11 +2162,6 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
     ats_routing.set_candidate_target(cid, ats_routing.destination_for(actor), user_id)
     candidate_source = str(candidate.get("source") or "").strip().casefold()
     source_rules = {
-        "npino": (
-            lambda host, path: (host == "npino.com" or host.endswith(".npino.com"))
-            and bool(re.match(r"^/[a-z][a-z-]*/\d{10}(?:-[^/]*)?/?$", path, re.IGNORECASE)),
-            "NPI No.",
-        ),
         "usnews": (
             lambda host, path: host == "health.usnews.com"
             and bool(re.match(r"^/(?:doctors|nurse-practitioners)/", path, re.IGNORECASE)),
