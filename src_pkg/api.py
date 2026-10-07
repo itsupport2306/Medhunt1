@@ -1284,7 +1284,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
     existing = store.get_resume_by_checksum(cid, checksum)
     if existing:
         store.save_resume_extraction(existing["id"], cid, extraction)
-        nexus_delivery = (
+        nexus_delivery_job = (
             store.enqueue_nexus_delivery(
                 cid, existing["id"], checksum, requested_by=user_id,
             )
@@ -1299,7 +1299,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
             "deduplicated": True,
             "ceipal_sync_status": ceipal_sync_status,
             "nexus_sync_status": (
-                nexus_delivery.get("status") if nexus_delivery else nexus_skip_status
+                nexus_delivery_job.get("status") if nexus_delivery_job else nexus_skip_status
             ),
         }
     if storage.enabled():
