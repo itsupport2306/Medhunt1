@@ -31,6 +31,7 @@ def upload_candidate(candidate_id: int, user_id: str) -> str:
         and str(item.get("kind") or "").casefold() in {"wireless", "mobile"}
     ]
     payload = {
+        "candidate_id": str(candidate_id),
         "name": str(candidate.get("canonical_name") or candidate.get("name") or "").strip(),
         "location": str(candidate.get("location") or "").strip(),
         "emails": list(projected.get("emails") or []),
