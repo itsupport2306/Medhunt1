@@ -102,7 +102,7 @@ const SOURCING_PLATFORMS = {
     key: "usnews",
     label: "U.S. News Doctor Finder",
     host: (hostname, url) => hostname === "health.usnews.com" &&
-      /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url?.pathname || ""),
+      /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
     adapterRevision: "healthcare-directory-v9",
     adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
@@ -138,8 +138,20 @@ const SOURCING_PLATFORMS = {
     adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
     resumeCapture: false,
   },
+  webmd: {
+    key: "webmd",
+    label: "WebMD",
+    host: (hostname, url) => hostname === "doctor.webmd.com"
+      && (/^\/results(?:\/|$)/i.test(url?.pathname || "")
+        || /^\/providers\/specialty(?:\/|$)/i.test(url?.pathname || "")
+        || /^\/doctor\/[^/]+-overview\/?$/i.test(url?.pathname || "")),
+    contentScript: "healthcare-directory-content.js",
+    adapterRevision: "healthcare-directory-v9",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    resumeCapture: false,
+  },
 };
-const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare"]);
+const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd"]);
 
 let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
@@ -1545,7 +1557,11 @@ function professionalProfileImportPayload(profile) {
 // healthcare-directory adapters, without guessing that an arbitrary skill or
 // headline is a recruiting-system specialty.
 function profileSpecialties(profile, list) {
-  const values = [profile?.specialty, ...(Array.isArray(profile?.specialties) ? profile.specialties : [])];
+  const values = [
+    profile?.specialty,
+    ...(Array.isArray(profile?.specialties) ? profile.specialties : []),
+    ...(Array.isArray(profile?.profile_document?.specialties) ? profile.profile_document.specialties : []),
+  ];
   for (const line of String(profile?.notes || "").split(/\r?\n/)) {
     const match = line.match(/^specialt(?:y|ies)\s*:\s*(.+)$/i);
     if (match) values.push(...match[1].split(/\s*[;,|]\s*/));
@@ -2498,7 +2514,7 @@ async function ensureProfessionalProfileResume(profile) {
   const candidateId = Number(profile?._candidateId);
   const documentProfile = profile?.profile_document;
   if (
-    !["usnews", "medifind", "commonspirit", "sharecare"].includes(profile?.source) || !candidateId
+    !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(profile?.source) || !candidateId
     || !hasCompleteIndeedContact(indeedLookupFor(profile))
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;

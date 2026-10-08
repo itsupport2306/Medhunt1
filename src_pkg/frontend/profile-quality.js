@@ -108,6 +108,7 @@
       npiprofile: "npiprofile.com",
       usnews: "health.usnews.com",
       medifind: "medifind.com",
+      webmd: "doctor.webmd.com",
       commonspirit: "commonspirit.org",
       sharecare: "providers.sharecare.com",
     };
@@ -132,11 +133,12 @@
       if (platform === "linkedin") return /^\/in\/[^/?#]+\/?$/i.test(url.pathname);
       if (platform === "facebook") return facebookProfilePath(url);
       if (platform === "usnews") {
-        return /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url.pathname);
+        return /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)(?:\/|$)/i.test(url.pathname);
       }
       if (platform === "medifind") return /^\/doctors\/[^/?#]+\/\d+\/?$/i.test(url.pathname);
       if (platform === "commonspirit") return /^\/find-a-doctor\/[^/?#]+-\d+\/?$/i.test(url.pathname);
       if (platform === "sharecare") return /^\/doctor\/[^/?#]+\/?$/i.test(url.pathname);
+      if (platform === "webmd") return /^\/doctor\/[^/?#]+-overview\/?$/i.test(url.pathname);
       return true;
     } catch {
       return false;
@@ -160,7 +162,7 @@
 
   function sanitizeProfileDocument(value, platform, sourceUrl) {
     if (
-      !["usnews", "medifind", "commonspirit", "sharecare"].includes(platform) || !value || typeof value !== "object"
+      !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(platform) || !value || typeof value !== "object"
       || value.kind !== "public_professional_profile"
     ) return null;
     const documentUrl = cleanText(value.source_url || sourceUrl, 1200);

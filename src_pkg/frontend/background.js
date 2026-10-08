@@ -50,9 +50,14 @@ function sourcingPlatformForUrl(value) {
     if (host === "providers.sharecare.com" && /^\/(?:find-a-doctor|doctor)(?:\/|$)/i.test(url.pathname)) {
       return "sharecare";
     }
+    if (host === "doctor.webmd.com" && (
+      /^\/results(?:\/|$)/i.test(url.pathname)
+      || /^\/providers\/specialty(?:\/|$)/i.test(url.pathname)
+      || /^\/doctor\/[^/]+-overview\/?$/i.test(url.pathname)
+    )) return "webmd";
     if (
       host === "health.usnews.com" &&
-      /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url.pathname)
+      /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)(?:\/|$)/i.test(url.pathname)
     ) return "usnews";
   } catch {
     // Browser-internal and partially loaded URLs are intentionally unsupported.

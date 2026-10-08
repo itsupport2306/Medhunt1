@@ -1717,7 +1717,9 @@ def upsert_candidate_profiles(profiles, default_job_id=None):
                 identities.setdefault(identity_key, canonical)
             else:
                 merged = unique_profiles[canonical]
-                if len(profile["notes"]) > len(merged["notes"]):
+                if "Specialty:" in profile["notes"] and profile["notes"] not in merged["notes"]:
+                    merged["notes"] = (profile["notes"] + "\n" + merged["notes"])[:20000]
+                elif len(profile["notes"]) > len(merged["notes"]):
                     merged["notes"] = profile["notes"]
                 if profile["source_url"]:
                     merged["source_url"] = profile["source_url"]
@@ -1789,6 +1791,9 @@ def upsert_candidate_profiles(profiles, default_job_id=None):
                     ELSE c.name
                   END,
                   notes=CASE
+                    WHEN POSITION('Specialty:' IN m.notes)>0
+                      AND POSITION(m.notes IN COALESCE(c.notes,''))=0
+                    THEN LEFT(m.notes || CHR(10) || COALESCE(c.notes,''), 20000)
                     WHEN LENGTH(m.notes)>LENGTH(COALESCE(c.notes,'')) THEN m.notes
                     ELSE c.notes
                   END,
@@ -2013,7 +2018,10 @@ def upsert_candidate_profiles(profiles, default_job_id=None):
                 )
                 if matched_by_source_id and name and name != existing.get("name"):
                     updates["name"] = name
-                if notes and len(notes) > len(existing.get("notes") or ""):
+                existing_notes = existing.get("notes") or ""
+                if notes and "Specialty:" in notes and notes not in existing_notes:
+                    updates["notes"] = (notes + "\n" + existing_notes)[:20000]
+                elif notes and len(notes) > len(existing_notes):
                     updates["notes"] = notes
                 if location and (matched_by_source_id or not existing.get("location")):
                     updates["location"] = location

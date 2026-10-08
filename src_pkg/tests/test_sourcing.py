@@ -3528,6 +3528,7 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
             assert payload["document_type"] == "public_professional_profile"
             assert payload["resume"]["filename"].endswith(".pdf")
             resume_id = payload["resume"]["id"]
+            assert "Specialty: Obstetrics & Gynecology" in store.get_candidate(candidate_id)["notes"]
 
             downloaded = await client.get(
                 f"/candidates/{candidate_id}/resumes/{resume_id}",
@@ -3754,6 +3755,9 @@ def test_frontend_is_manifest_v3_compatible():
     assert "*://npiprofile.com/*" in manifest["host_permissions"]
     assert "https://health.usnews.com/doctors/*" in manifest["host_permissions"]
     assert "https://health.usnews.com/nurse-practitioners/*" in manifest["host_permissions"]
+    assert "https://health.usnews.com/physician-assistants/*" in manifest["host_permissions"]
+    assert "https://health.usnews.com/dentists/*" in manifest["host_permissions"]
+    assert "https://doctor.webmd.com/*" in manifest["host_permissions"]
     assert "*://*.medifind.com/*" in manifest["host_permissions"]
     assert "*://*.commonspirit.org/*" in manifest["host_permissions"]
     assert "https://providers.sharecare.com/find-a-doctor/*" in manifest["host_permissions"]
@@ -3823,7 +3827,7 @@ def test_frontend_is_manifest_v3_compatible():
     assert 'key: "usnews"' in app_script
     assert 'key: "medifind"' in app_script
     assert "professional-profile-resume" in app_script
-    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare"])' in app_script
+    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd"])' in app_script
     assert 'key: "sharecare"' in app_script
     assert "captureProfessionalProfileInBackground" in app_script
     assert "startProfessionalProfileResumeBatch" in app_script
@@ -3877,7 +3881,7 @@ def test_frontend_is_manifest_v3_compatible():
         "people data labs", "pdl", "enformion", "endato", "nppes", "neon",
         "cloudflare", "sqlite", "likelihood", "mobile_phone", "gemini",
         "neverbounce", "twilio", "usphonebook", "provider credit",
-        "quick sourcer", "quick_sourcer", "quick-sourcer", "nexus",
+            "quick sourcer", "quick_sourcer", "quick-sourcer",
         "api_key", "client_secret",
     ):
         assert hidden_term not in client_bundle

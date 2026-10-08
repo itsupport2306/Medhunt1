@@ -1,4 +1,4 @@
-(() => {
+﻿(() => {
   "use strict";
 
   const ADAPTER_REVISION = "healthcare-directory-v9";
@@ -22,6 +22,8 @@
               ? { key: "commonspirit", label: "CommonSpirit Health" }
               : host === "providers.sharecare.com"
                 ? { key: "sharecare", label: "Sharecare" }
+                : host === "doctor.webmd.com"
+                  ? { key: "webmd", label: "WebMD" }
               : null;
   if (!PLATFORM) return;
 
@@ -257,7 +259,7 @@
   }
 
   function exactUsNewsProfilePath() {
-    return /^\/(?:doctors|nurse-practitioners)\/[^/?#]+-\d+\/?$/i.test(location.pathname);
+    return /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)\/[^/?#]+-\d+\/?$/i.test(location.pathname);
   }
 
   function exactMediFindProfilePath(value = location.pathname) {
@@ -1092,11 +1094,22 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
-    const cards = all('[data-test-id="DetailCardDoctor"]');
-    const roots = cards.length ? cards : [document];
+    const cards = all('[data-test-id="DetailCardDoctor"], [data-test-id*="DetailCard"], article:has(a[href^="/physician-assistants/"]), article:has(a[href^="/dentists/"])');
+    const profileLinks = all('a[href^="/doctors/"], a[href^="/nurse-practitioners/"], a[href^="/physician-assistants/"], a[href^="/dentists/"]')
+      .filter((link) => /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)\/[^/?#]+-\d+\/?$/i.test(new URL(link.href).pathname));
+    const roots = cards.length ? cards : (profileLinks.length
+      ? Array.from(new Set(profileLinks.map((link) => link.closest("article, li") || link.parentElement)))
+      : [document]);
 
     for (const root of roots) {
-      let physicians = jsonLdObjects(root).filter((value) => hasSchemaType(value, "Physician"));
+      let physicians = jsonLdObjects(root).filter((value) =>
+        hasSchemaType(value, "Physician") || hasSchemaType(value, "Dentist")
+        || hasSchemaType(value, "Person"));
+      if (!physicians.length && root !== document) {
+        const nameLink = root.querySelector('a[href^="/doctors/"], a[href^="/nurse-practitioners/"], a[href^="/physician-assistants/"], a[href^="/dentists/"]');
+        const name = cleanProviderName(nameLink?.textContent || root.querySelector("h2, h3")?.textContent);
+        if (nameLink && looksLikePersonName(name)) physicians = [{ name, url: nameLink.href }];
+      }
       if (!physicians.length && root === document && exactUsNewsProfilePath()) {
         const heroName = visibleText(document.querySelector('[data-test-id^="HeroGraphic"] h1, .hero h1, main h1'));
         if (looksLikePersonName(cleanProviderName(heroName))) {
@@ -1108,7 +1121,7 @@
         if (!looksLikePersonName(name)) continue;
 
         const sourceUrl = absoluteUrl(physician.url || root.querySelector?.(
-          'a[href^="/doctors/"], a[href^="/nurse-practitioners/"]'
+          'a[href^="/doctors/"], a[href^="/nurse-practitioners/"], a[href^="/physician-assistants/"], a[href^="/dentists/"]'
         )?.getAttribute("href") || location.href);
         let sourcePath = "";
         try { sourcePath = new URL(sourceUrl).pathname; } catch { /* absoluteUrl already supplied a safe fallback. */ }
@@ -1135,8 +1148,9 @@
           ...(profileDocument?.hospitals || []),
         ]);
         const profession = /\/nurse-practitioners(?:\/|$)/i.test(sourcePath)
-          ? "Nurse Practitioner"
-          : "Physician";
+          ? "Nurse Practitioner" : /\/physician-assistants(?:\/|$)/i.test(sourcePath)
+            ? "Physician Assistant" : /\/dentists(?:\/|$)/i.test(sourcePath)
+              ? "Dentist" : "Physician";
         const extra = unique([
           ...employers.map((employer) => `Employer: ${employer}`),
           ...(profileDocument?.subspecialties || []).map((value) => `Subspecialty: ${value}`),
@@ -1177,13 +1191,16 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
-    for (const link of all('a[href*="/npi/"]')) {
+    for (const link of all('h2 a[href], h3 a[href]')) {
       const href = absoluteUrl(link.getAttribute("href"));
-      const npi = href.match(/\/npi\/(\d{10})(?:-|\/|$)/i)?.[1] || npiFrom(link.textContent);
+      let parsed;
+      try { parsed = new URL(href); } catch { continue; }
+      if (parsed.hostname !== "npino.com" && !parsed.hostname.endsWith(".npino.com")) continue;
+      const npi = parsed.pathname.match(/^\/(?!npi\/)[^/]+\/(\d{10})(?:-|\/|$)/i)?.[1]
+        || parsed.pathname.match(/^\/npi\/(\d{10})(?:-|\/|$)/i)?.[1];
       if (!npi || seen.has(npi)) continue;
       const card = smallestContainer(link, /\bNPI Number\s*:/i);
-      const nameLink = card.querySelector?.('h2 a[href*="/npi/"], h3 a[href*="/npi/"]') || link;
-      const name = cleanProviderName(nameLink.textContent);
+      const name = cleanProviderName(link.textContent);
       if (!looksLikePersonName(name)) continue;
       const text = visibleText(card);
       const address = clean(text.match(/\bAddress\s*:\s*(.*?)(?=\s+(?:Phone|Fax)\s*:|$)/i)?.[1] || "", 500);
@@ -1205,6 +1222,156 @@
         captured_at: new Date().toISOString(),
       });
       elements.set(npi, card);
+      if (profiles.length >= 100) break;
+    }
+    return { profiles, elements };
+  }
+
+  function webmdSectionValues(labels) {
+    const expected = labels.map((label) => label.toLowerCase());
+    const values = [];
+    for (const title of all("h1, h2, h3, h4, dt, [class*='heading'], [class*='title']")) {
+      const text = visibleText(title).toLowerCase();
+      if (!expected.some((label) => text === label || text.includes(label))) continue;
+      const section = title.closest("section, article, [class*='section'], [class*='card']") || title.parentElement;
+      if (!section) continue;
+      values.push(...all("li, dd, p, a", section).filter((item) => item !== title).map(visibleText));
+    }
+    return unique(values.filter((value) => value.length < 300));
+  }
+
+  function webmdProfileDocument(physician, profile) {
+    const sourceUrl = absoluteUrl(profile?.source_url || physician?.url || canonicalPageUrl());
+    let source;
+    try { source = new URL(sourceUrl); } catch { return null; }
+    if (source.hostname.toLowerCase() !== "doctor.webmd.com"
+      || !/^\/doctor\/[^/?#]+-overview\/?$/i.test(source.pathname)) return null;
+    const exactPage = /^\/doctor\/[^/?#]+-overview\/?$/i.test(location.pathname)
+      && sameProfileUrl(sourceUrl, canonicalPageUrl());
+    const rawName = (exactPage && visibleText(document.querySelector("main h1, h1")))
+      || physician?.name || profile?.name || metaContent('meta[property="og:title"]');
+    const name = cleanProviderName(rawName);
+    if (!looksLikePersonName(name)) return null;
+    const credentials = providerCredentials(rawName);
+    const specialties = unique([
+      ...schemaNames(physician?.medicalSpecialty),
+      ...webmdSectionValues(["Specialty", "Specialties", "Areas of Expertise"]),
+      ...(profile?.specialties || []),
+    ]);
+    const hospitals = unique([
+      ...schemaNames(physician?.hospitalAffiliation),
+      ...webmdSectionValues(["Hospital Affiliations", "Affiliations"]),
+    ]);
+    const education = unique([
+      ...schemaNames(physician?.alumni), ...schemaNames(physician?.education),
+      ...webmdSectionValues(["Education & Training", "Education", "Medical School", "Residency", "Fellowship"]),
+    ]);
+    const credentialsAndLicenses = unique([
+      ...schemaNames(physician?.hasCredential),
+      ...webmdSectionValues(["Certifications", "License", "Licenses", "Certifications, License, & Education"]),
+    ]);
+    const licenses = credentialsAndLicenses.filter((value) => /\blicen[cs]e\b/i.test(value));
+    const certifications = credentialsAndLicenses.filter((value) => !licenses.includes(value));
+    const languages = unique([
+      ...schemaNames(physician?.knowsLanguage), ...webmdSectionValues(["Languages Spoken", "Languages"]),
+    ]);
+    const summary = clean(physician?.description
+      || (exactPage && visibleText(document.querySelector('[class*="biography"], [class*="overview"], [class*="about"]')))
+      || (exactPage && metaContent('meta[name="description"]')), 4000);
+    const address = postalAddress(physician?.address)
+      || (exactPage && visibleText(document.querySelector('[itemprop="address"], address, [class*="address"]')))
+      || profile?.address || "";
+    const locationValue = physician?.address && typeof physician.address === "object"
+      ? [clean(physician.address.addressLocality, 120), clean(physician.address.addressRegion, 80)].filter(Boolean).join(", ")
+      : (profile?.location || locationFromAddress(address));
+    if (!specialties.length && !hospitals.length && !education.length && !licenses.length
+      && !certifications.length && !summary) return null;
+    const specialty = specialties[0] || profile?.headline || providerProfession(credentials);
+    return {
+      kind: "public_professional_profile",
+      source_label: "WebMD",
+      source_url: sourceUrl,
+      headline: specialty,
+      summary,
+      credentials,
+      specialties,
+      subspecialties: [],
+      hospitals,
+      education,
+      licenses,
+      certifications,
+      languages,
+      npi: npiFrom(document.querySelector("[data-npi]")?.getAttribute("data-npi") || profile?.source_id || ""),
+      address,
+      location: locationValue,
+    };
+  }
+
+  function webmdProfiles() {
+    const profiles = [];
+    const elements = new Map();
+    const seen = new Set();
+    const profilePath = /^\/doctor\/[^/?#]+-overview\/?$/i.test(location.pathname);
+    const roots = profilePath ? [document] : all("li.ep[data-npi], li.ep, article[class*='result'], .results-card-wrap");
+    for (const root of roots) {
+      const link = root.querySelector?.("a.prov-name[href*='/doctor/'], a[href*='/doctor/'][href*='overview']")
+        || (profilePath ? null : null);
+      const href = link?.getAttribute("href") || (profilePath ? location.href : "");
+      const linkedUrl = absoluteUrl(href);
+      let parsed;
+      try { parsed = new URL(linkedUrl); } catch { continue; }
+      if (parsed.hostname.toLowerCase() !== "doctor.webmd.com"
+        || !/^\/doctor\/[^/?#]+-overview\/?$/i.test(parsed.pathname)) continue;
+      const sourceUrl = `${parsed.origin}${parsed.pathname}`;
+      const pathKey = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+      if (seen.has(pathKey)) continue;
+      const physician = jsonLdObjects(root).find((value) => hasSchemaType(value, "Physician"))
+        || jsonLdObjects().find((value) => hasSchemaType(value, "Physician") && sameProfileUrl(value.url || "", sourceUrl))
+        || null;
+      const rawName = (profilePath && visibleText(document.querySelector("main h1, h1")))
+        || visibleText(link) || physician?.name || "";
+      const name = cleanProviderName(rawName);
+      if (!looksLikePersonName(name)) continue;
+      const npi = npiFrom(root.getAttribute?.("data-npi") || physician?.identifier?.value || physician?.identifier || "");
+      const sourceId = npi || parsed.pathname.replace(/^\/doctor\//i, "").replace(/-overview\/?$/i, "");
+      if (!sourceId) continue;
+      const cardText = visibleText(root);
+      const specialty = clean(root.querySelector?.(".prov-specialty, [class*='specialty']")?.textContent
+        || schemaNames(physician?.medicalSpecialty)[0] || specialtyFromPage(), 180);
+      const imageAlt = clean(root.querySelector?.("img[alt]")?.getAttribute("alt") || "", 300);
+      const providerLocation = clean(
+        cardText.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})(?=\s*[-|])/i)?.[1]
+          || imageAlt.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})\b/)?.[1]
+          || "",
+        180,
+      );
+      const credentials = providerCredentials(rawName);
+      const documentProfile = profilePath ? webmdProfileDocument(physician, {
+        name, source_url: sourceUrl, source_id: sourceId, specialty, headline: specialty,
+      }) : null;
+      const resolvedSpecialty = documentProfile?.specialties?.[0] || specialty;
+      const profile = {
+        name,
+        location: documentProfile?.location || providerLocation,
+        headline: resolvedSpecialty || providerProfession(credentials),
+        notes: profileNotes({
+          npi, specialty: resolvedSpecialty, address: documentProfile?.address || "",
+          extra: documentProfile?.summary || cardText.slice(0, 800),
+        }),
+        roles: [providerProfession(credentials)],
+        employers: documentProfile?.hospitals || schemaNames(physician?.hospitalAffiliation),
+        schools: documentProfile?.education || schemaNames(physician?.alumni),
+        licenses: documentProfile?.licenses || [],
+        certifications: documentProfile?.certifications || schemaNames(physician?.hasCredential),
+        profile_document: documentProfile || undefined,
+        source: PLATFORM.key,
+        source_url: sourceUrl,
+        source_id: sourceId,
+        captured_at: new Date().toISOString(),
+      };
+      seen.add(pathKey);
+      profiles.push(profile);
+      elements.set(sourceId, root === document ? document.documentElement : root);
       if (profiles.length >= 100) break;
     }
     return { profiles, elements };
@@ -1308,7 +1475,9 @@
             : PLATFORM.key === "commonspirit"
               ? commonSpiritProfiles()
               : PLATFORM.key === "sharecare"
-                ? sharecareProfiles()
+              ? sharecareProfiles()
+              : PLATFORM.key === "webmd"
+                ? webmdProfiles()
                 : usNewsProfiles();
     lastProfiles = result.profiles;
     lastElements = result.elements;
@@ -1346,7 +1515,7 @@
     if (!profile) return { ok: false, error: "That displayed provider is no longer available." };
     const element = lastElements.get(profile.source_id);
     const link = element?.matches?.("a[href]") ? element : element?.querySelector?.(
-      'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.information'
+      'h2 a[href], h3 a[href], a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/physician-assistants/"], a[href*="/dentists/"], a[href*="/find-a-doctor/"], a.information'
     );
     if (link) {
       link.scrollIntoView({ block: "center", behavior: "auto" });

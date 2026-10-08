@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.36.5"
+APP_VERSION = "3.37.3"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -2164,7 +2164,7 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
     source_rules = {
         "usnews": (
             lambda host, path: host == "health.usnews.com"
-            and bool(re.match(r"^/(?:doctors|nurse-practitioners)/", path, re.IGNORECASE)),
+            and bool(re.match(r"^/(?:doctors|nurse-practitioners|physician-assistants|dentists)/", path, re.IGNORECASE)),
             "U.S. News",
         ),
         "medifind": (
@@ -2181,6 +2181,11 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
             lambda host, path: host == "providers.sharecare.com"
             and bool(re.match(r"^/doctor/[^/]+/?$", path, re.IGNORECASE)),
             "Sharecare",
+        ),
+        "webmd": (
+            lambda host, path: host == "doctor.webmd.com"
+            and bool(re.match(r"^/doctor/[^/?#]+-overview/?$", path, re.IGNORECASE)),
+            "WebMD",
         ),
     }
     rule = source_rules.get(candidate_source)
@@ -2209,6 +2214,19 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
             "Professional profile PDF rendering failed for candidate %s", cid,
         )
         raise HTTPException(500, "Professional profile PDF could not be generated.") from exc
+    # Older published extensions send structured specialty data with the
+    # profile PDF but may not include it in the earlier candidate import.
+    # Persist it before storing the PDF, which also queues Nexus delivery.
+    existing_notes = str(candidate.get("notes") or "")
+    existing_lines = {line.strip().casefold() for line in existing_notes.splitlines()}
+    specialty_lines = [
+        f"Specialty: {' '.join(str(value).split())[:240]}"
+        for value in profile["specialties"][:20]
+        if str(value).strip()
+    ]
+    new_lines = [line for line in specialty_lines if line.casefold() not in existing_lines]
+    if new_lines:
+        store.update_candidate(cid, notes="\n".join([*new_lines, existing_notes])[:20000])
     resume = _store_resume_pdf(
         cid,
         profile_resume.filename(candidate, profile),
