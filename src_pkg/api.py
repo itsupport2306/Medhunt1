@@ -35,7 +35,7 @@ from sourcing import (
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
     profile_resume, zoom_sms,
-    contact_lookup_queue, ats_routing,
+    contact_lookup_queue, ats_routing, ceipal_delivery,
 )
 
 
@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.37.3"
+APP_VERSION = "3.37.4"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -1197,48 +1197,7 @@ def create_campaign(body: CampaignCreateIn):
 
 
 def _upload_ceipal_candidate(candidate_id: int, user_id: str) -> str:
-    """Send a Ceipal-assigned candidate to Halo once, without a remote lookup."""
-    candidate = store.get_candidate(candidate_id)
-    if not candidate:
-        return "failed"
-    route = store.get_candidate_ats_route(candidate_id, user_id) or {}
-    eligibility = route.get("eligibility") or {}
-    previous = eligibility.get("ceipal_upload") or {}
-    if previous.get("state") == "uploaded_to_ceipal":
-        return "uploaded"
-
-    projected = contact_access.project_candidate(candidate)
-    wireless_phones = [
-        str(item.get("value") or "").strip()
-        for item in projected.get("phone_contacts") or []
-        if isinstance(item, dict)
-        and str(item.get("kind") or "").casefold() in {"wireless", "mobile"}
-    ]
-    payload = {
-        "name": str(candidate.get("canonical_name") or candidate.get("name") or "").strip(),
-        "location": str(candidate.get("location") or "").strip(),
-        "emails": list(projected.get("emails") or []),
-        "phones": list(projected.get("phones") or []),
-        "wireless_phones": list(dict.fromkeys(wireless_phones)),
-    }
-    try:
-        result = healthboard_auth.medhunt_ceipal_candidate(
-            user_id=str(user_id or ""), candidate=payload,
-        )
-        state = str(result.get("state") or "uploaded_to_ceipal")
-        eligibility["ceipal_upload"] = {
-            "state": state,
-            "applicant_id": str(result.get("applicant_id") or ""),
-            "checked": False,
-        }
-        store.set_candidate_ats_route(candidate_id, user_id, "ceipal", eligibility)
-        return "uploaded" if state == "uploaded_to_ceipal" else state
-    except Exception as exc:
-        logging.getLogger("medhunt.ceipal").warning(
-            "Ceipal upload deferred for candidate %s (%s).",
-            candidate_id, type(exc).__name__,
-        )
-        return "failed"
+    return ceipal_delivery.upload_candidate(candidate_id, user_id)
 
 
 def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "local"):
@@ -2186,6 +2145,11 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
             lambda host, path: host == "doctor.webmd.com"
             and bool(re.match(r"^/doctor/[^/?#]+-overview/?$", path, re.IGNORECASE)),
             "WebMD",
+        ),
+        "npino": (
+            lambda host, path: (host == "npino.com" or host.endswith(".npino.com"))
+            and bool(re.match(r"^/[^/]+/\d{10}(?:-[^/]+)?/?$", path, re.IGNORECASE)),
+            "NPI No.",
         ),
     }
     rule = source_rules.get(candidate_source)

@@ -151,7 +151,7 @@ const SOURCING_PLATFORMS = {
     resumeCapture: false,
   },
 };
-const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd"]);
+const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd", "npino"]);
 
 let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
@@ -181,6 +181,8 @@ let activeSourcingContextKey = "";
 let activePageIndicatorLabel = "Candidate page";
 let indeedCandidates = [];
 let indeedSelected = new Set();
+let enrichedProfileKeys = new Set();
+let enrichedProfileOwner = "";
 let indeedSaveStatus = null;
 const indeedSavePromises = new Map();
 const professionalProfileResumePromises = new Map();
@@ -518,7 +520,7 @@ const ROW_CONTACT_LIMIT = 3;
 function moreContactsNote(shown, total) {
   const hidden = Math.max(0, total - shown);
   return hidden
-    ? `<span class="lookup-detail">+${hidden} more — open Public records</span>`
+    ? `<span class="lookup-detail">+${hidden} more — open Candidate details</span>`
     : "";
 }
 
@@ -1618,7 +1620,7 @@ function startProfessionalProfileResumeBatch(profiles) {
     const result = indeedLookupFor(profile);
     if (
       !PROFESSIONAL_PROFILE_SOURCES.has(profile?.source) || !candidateId
-      || !hasCompleteIndeedContact(result)
+      || !isIndeedMatch(result)
       || (result.resume && profile._detailProfileCaptured)
       || seenCandidates.has(candidateId)
     ) return false;
@@ -1736,7 +1738,7 @@ function publicRecordButton(name, location, candidateId = 0, className = "btn gh
   return `<button type="button" class="${className}" data-action="public-records"
     data-qs-name="${escapeHtml(name)}"
     data-qs-location="${escapeHtml(location || "")}"
-    data-qs-candidate="${Number(candidateId) || 0}">Public records</button>`;
+    data-qs-candidate="${Number(candidateId) || 0}">Candidate details</button>`;
 }
 
 function publicRecordRetryAttributes(context) {
@@ -1959,6 +1961,51 @@ function indeedProfileKey(profile, index) {
   return `row:${index}:${profile.name || ""}:${profile.location || ""}`;
 }
 
+function enrichedStorageKey() {
+  const owner = String(authSession?.user?.user_id || authSession?.user?.email || "local");
+  return `medhunt-enriched-profiles-v1:${owner}`;
+}
+
+function loadEnrichedProfileKeys() {
+  const owner = enrichedStorageKey();
+  if (owner === enrichedProfileOwner) return;
+  enrichedProfileOwner = owner;
+  try {
+    const saved = JSON.parse(localStorage.getItem(owner) || "[]");
+    enrichedProfileKeys = new Set(Array.isArray(saved) ? saved.filter((key) => typeof key === "string") : []);
+  } catch {
+    enrichedProfileKeys = new Set();
+  }
+}
+
+function enrichedProfileKey(profile) {
+  const source = String(profile?.source || activeSourcingPlatform?.key || "");
+  const identity = String(profile?.source_id || profile?.source_url || "");
+  return source && identity ? `${source}:${identity}` : "";
+}
+
+function isPreviouslyEnriched(profile) {
+  loadEnrichedProfileKeys();
+  const key = enrichedProfileKey(profile);
+  return Boolean(key && enrichedProfileKeys.has(key));
+}
+
+function rememberEnrichedProfile(profile) {
+  loadEnrichedProfileKeys();
+  const key = enrichedProfileKey(profile);
+  if (!key) return;
+  enrichedProfileKeys.add(key);
+  try {
+    localStorage.setItem(enrichedProfileOwner, JSON.stringify(Array.from(enrichedProfileKeys).slice(-5000)));
+  } catch {
+    // Storage can be unavailable in a restricted browser profile.
+  }
+}
+
+function selectableIndeedCandidates() {
+  return indeedCandidates.filter((profile) => !isPreviouslyEnriched(profile));
+}
+
 function updateIndeedSelectionUi() {
   const count = indeedSelected.size;
   const counter = $("#indeedSelectedCount");
@@ -1977,14 +2024,16 @@ function updateIndeedSelectionUi() {
   });
   const selectionToggle = $(".selection-toggle");
   if (selectionToggle) {
-    selectionToggle.textContent = indeedCandidates.length > 0 && count === Math.min(indeedCandidates.length, MAX_LOOKUP_SELECTION)
+    const selectable = selectableIndeedCandidates();
+    selectionToggle.textContent = selectable.length > 0 && count === Math.min(selectable.length, MAX_LOOKUP_SELECTION)
       ? "Clear selection"
       : (Number.isFinite(MAX_LOOKUP_SELECTION)
-        ? `Select up to ${MAX_LOOKUP_SELECTION} before 4 PM PT`
+        ? `Select up to ${MAX_LOOKUP_SELECTION}`
         : "Select all profiles");
   }
   document.querySelectorAll(".indeed-select").forEach((checkbox) => {
-    checkbox.disabled = indeedScanState.phase === "lookup" || (
+    checkbox.disabled = indeedScanState.phase === "lookup" ||
+      isPreviouslyEnriched(indeedCandidates.find((profile) => profile._selectionKey === checkbox.dataset.key)) || (
       count >= MAX_LOOKUP_SELECTION && !checkbox.checked
     );
   });
@@ -2351,13 +2400,14 @@ function renderIndeedProfiles(scan = {}) {
             <span class="section-kicker">Profiles on this page</span>
             <strong>${indeedCandidates.length} profiles ready</strong>
           </div>
-          <button type="button" class="text-button selection-toggle" data-action="toggle-all-indeed">${indeedSelected.size === indeedCandidates.length ? "Clear selection" : "Select all"}</button>
+          <button type="button" class="text-button selection-toggle" data-action="toggle-all-indeed">${indeedSelected.size === selectableIndeedCandidates().length ? "Clear selection" : "Select all"}</button>
         </div>`}
 
       <div class="indeed-candidate-list${hasResults ? " result-list" : ""}" id="indeedCandidateList" data-testid="profile-list">
         ${profiles.length
           ? profiles.map((profile) => {
           const key = profile._selectionKey;
+          const previouslyEnriched = !hasResults && isPreviouslyEnriched(profile);
           const originalIndex = indeedCandidates.indexOf(profile);
           const searchText = [profile.name, profile.location, profile.headline, ...(profile.roles || [])]
             .filter(Boolean).join(" ").toLowerCase();
@@ -2372,12 +2422,13 @@ function renderIndeedProfiles(scan = {}) {
           const primary = hasResults
             ? `${avatar}${identity}`
             : `<div class="capture-row-primary">
-                <label class="candidate-select-control"><input type="checkbox" class="indeed-select" data-key="${escapeHtml(key)}"${indeedSelected.has(key) ? " checked" : ""}${isLookingUp ? " disabled" : ""}><span class="sr-only">Select ${escapeHtml(profile.name)}</span></label>
+                <label class="candidate-select-control"><input type="checkbox" class="indeed-select" data-key="${escapeHtml(key)}"${indeedSelected.has(key) ? " checked" : ""}${isLookingUp || previouslyEnriched ? " disabled" : ""}><span class="sr-only">Select ${escapeHtml(profile.name)}</span></label>
                 ${avatar}
                 ${identity}
               </div>`;
-          return `<article class="capture-row${hasResults ? "" : " candidate-queue-card"}${indeedSelected.has(key) ? " selected" : ""}" data-profile-key="${escapeHtml(key)}" data-search="${escapeHtml(searchText)}">
+          return `<article class="capture-row${hasResults ? "" : " candidate-queue-card"}${indeedSelected.has(key) ? " selected" : ""}${previouslyEnriched ? " previously-enriched" : ""}" data-profile-key="${escapeHtml(key)}" data-search="${escapeHtml(searchText)}">
             ${primary}
+            ${previouslyEnriched ? `<span class="already-enriched-badge">Already enriched</span>` : ""}
             ${hasResults || isLookingUp ? `<div class="capture-result">${indeedResultStatus(profile)}</div>` : ""}
             ${hasResults ? nexusCandidateStatusMarkup(profile._candidateId) : ""}
             ${publicRecordButton(profile.name, profile.location, profile._candidateId || 0, "capture-row-action")}
@@ -2514,8 +2565,8 @@ async function ensureProfessionalProfileResume(profile) {
   const candidateId = Number(profile?._candidateId);
   const documentProfile = profile?.profile_document;
   if (
-    !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(profile?.source) || !candidateId
-    || !hasCompleteIndeedContact(indeedLookupFor(profile))
+    !["usnews", "medifind", "commonspirit", "sharecare", "webmd", "npino"].includes(profile?.source) || !candidateId
+    || !isIndeedMatch(indeedLookupFor(profile))
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;
   const key = `${candidateId}|${JSON.stringify(documentProfile)}`;
@@ -2701,7 +2752,7 @@ async function performDisplayedIndeedSave(searchUrl) {
         && professionalProfile._detail_capture_ready !== false
         && PROFESSIONAL_PROFILE_SOURCES.has(professionalProfile.source)
         && sameProfessionalProfileUrl(activeSourcingPageUrl, professionalProfile.source_url)
-        && hasCompleteIndeedContact(indeedLookupFor(professionalProfile))
+        && isIndeedMatch(indeedLookupFor(professionalProfile))
       ) {
         professionalProfile._detailProfileCaptured = true;
         professionalProfiles.push(professionalProfile);
@@ -2890,15 +2941,17 @@ async function scanIndeedCandidates(options = {}) {
       indeedLookupSummary = null;
       indeedResultFilter = "all";
     }
+    loadEnrichedProfileKeys();
     indeedSelected = keepSelection
       ? (previouslySelectedAll
-        ? new Set(indeedCandidates.map((profile) => profile._selectionKey))
+        ? new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
         : new Set(
         indeedCandidates
+          .filter((profile) => !isPreviouslyEnriched(profile))
           .map((profile) => profile._selectionKey)
           .filter((key) => previousSelection.has(key)),
         ))
-      : new Set(indeedCandidates.map((profile) => profile._selectionKey));
+      : new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey));
     indeedScanState = {
       phase: "captured",
       found: indeedCandidates.length,
@@ -3309,7 +3362,7 @@ async function cancelLinkedinPdf(index) {
 }
 
 function selectedIndeedProfiles() {
-  return indeedCandidates.filter((profile) => indeedSelected.has(profile._selectionKey));
+  return selectableIndeedCandidates().filter((profile) => indeedSelected.has(profile._selectionKey));
 }
 
 function updateIndeedLookupProgressUi(profile = null) {
@@ -3332,7 +3385,7 @@ async function lookupSelectedIndeedCandidates() {
   const profiles = selectedIndeedProfiles();
   if (!profiles.length) throw new Error(`Select at least one ${activeSourcingPlatform.label} profile.`);
   if (profiles.length > MAX_LOOKUP_SELECTION) {
-    throw new Error(`Select no more than ${MAX_LOOKUP_SELECTION} candidates before 4:00 PM Pacific.`);
+    throw new Error(`Select no more than ${MAX_LOOKUP_SELECTION} candidates.`);
   }
   indeedLookupProfiles = profiles.slice();
   clearTimeout(indeedAutoScanTimer);
@@ -3446,6 +3499,7 @@ async function lookupSelectedIndeedCandidates() {
       resume_error: previous.resume_error || "",
     };
     indeedLookupState.set(profile._selectionKey, result);
+    if (isIndeedMatch(result)) rememberEnrichedProfile(profile);
     const candidateId = Number(profile._candidateId);
     if (
       profile.source === "indeed" && hasCompleteIndeedContact(result) && !result.resume
@@ -3464,7 +3518,7 @@ async function lookupSelectedIndeedCandidates() {
     }
     if (
       PROFESSIONAL_PROFILE_SOURCES.has(profile.source)
-      && hasCompleteIndeedContact(result)
+      && isIndeedMatch(result)
       && (!result.resume || !profile._detailProfileCaptured)
       && !queuedResumeCandidateIds.has(candidateId)
     ) {
@@ -3609,7 +3663,7 @@ async function lookupSelectedIndeedCandidates() {
 }
 
 function toggleAllIndeedCandidates() {
-  const selectable = indeedCandidates.slice(0, MAX_LOOKUP_SELECTION);
+  const selectable = selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION);
   indeedSelected = indeedSelected.size === selectable.length
     ? new Set()
     : new Set(selectable.map((profile) => profile._selectionKey));
@@ -4611,7 +4665,7 @@ document.addEventListener("change", async (event) => {
   if (event.target.classList.contains("indeed-select")) {
     if (event.target.checked && indeedSelected.size >= MAX_LOOKUP_SELECTION) {
       event.target.checked = false;
-      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates before 4:00 PM Pacific.`, "error");
+      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates.`, "error");
     } else if (event.target.checked) indeedSelected.add(event.target.dataset.key);
     else indeedSelected.delete(event.target.dataset.key);
     updateIndeedSelectionUi();
@@ -4619,7 +4673,7 @@ document.addEventListener("change", async (event) => {
   }
   if (event.target.id === "indeedSelectAll") {
     indeedSelected = event.target.checked
-      ? new Set(indeedCandidates.slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
+      ? new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
       : new Set();
     document.querySelectorAll(".indeed-select").forEach((checkbox) => {
       checkbox.checked = indeedSelected.has(checkbox.dataset.key);

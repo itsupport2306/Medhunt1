@@ -72,11 +72,11 @@
     }
   }
 
-  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|PA-C|RN|LPN|MSN|BSN|DDS|DMD|FACP|FACOG)\.?$/i;
+  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|(?:R?PA-C|PAC|P\.?A\.?|PHYSICIAN ASSISTANT)|RN|LPN|MSN|BSN|MS|SCD|DDS|DMD|FACP|FACOG)\.?$/i;
 
   function providerCredentials(value) {
     const parts = clean(value, 240)
-      .replace(/^(?:dr\.?|doctor)\s+/i, "")
+      .replace(/^(?:dr\.?|doctor|mr\.?|mrs\.?|ms\.?|miss)\s+/i, "")
       .split(",")
       .map((part) => clean(part, 60));
     return unique(parts.slice(1).filter((part) => PROVIDER_CREDENTIAL.test(part)));
@@ -95,7 +95,7 @@
 
   function cleanProviderName(value) {
     const parts = clean(value, 240)
-      .replace(/^(?:dr\.?|doctor)\s+/i, "")
+      .replace(/^(?:dr\.?|doctor|mr\.?|mrs\.?|ms\.?|miss)\s+/i, "")
       .replace(/\s*\((?:individual|person)\)\s*$/i, "")
       .split(",")
       .map((part) => clean(part, 180));
@@ -1066,9 +1066,11 @@
       || visibleText(document.querySelector("#experience")),
     );
 
-    // Wait for the experience block to hydrate before creating a document.
-    // This avoids saving a second, incomplete PDF while the React page loads.
-    if (!education.length && !licenses.length && !certifications.length) return null;
+    // Some provider categories omit the experience block entirely. A named
+    // specialty, overview, or affiliation is enough to create an attributed
+    // public profile; the API still validates that professional details exist.
+    if (!specialties.length && !subspecialties.length && !hospitals.length
+      && !education.length && !licenses.length && !certifications.length && !overview) return null;
     return {
       kind: "public_professional_profile",
       source_label: "U.S. News Doctor Finder",
@@ -1191,6 +1193,54 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
+    const detailNpi = location.pathname.match(/^\/[^/]+\/(\d{10})(?:-[^/]*)?\/?$/i)?.[1] || "";
+    if (detailNpi) {
+      const fields = new Map();
+      for (const row of all("tr")) {
+        const cells = all("th, td", row).map(visibleText);
+        if (cells.length === 2 && cells[0] && !fields.has(cells[0].toLowerCase())) {
+          fields.set(cells[0].toLowerCase(), cells[1]);
+        }
+      }
+      const field = (...labels) => labels.map((label) => fields.get(label.toLowerCase()) || "").find(Boolean) || "";
+      const rawName = field("Nurse Name", "Doctor Name", "Dentist Name", "Provider Name", "Name")
+        || visibleText(document.querySelector("main h2, h2")).replace(/\s*-\s*\d{10}\s+Profile Details.*$/i, "");
+      const name = cleanProviderName(rawName);
+      if (looksLikePersonName(name) && !/organization/i.test(field("Provider Entity Type", "Enumeration Type"))) {
+        const specialty = clean(field("Specialization", "Speciality", "Specialty"), 180);
+        const credential = clean(field("Credential"), 80);
+        const license = clean(field("Licence No.", "License No."), 180);
+        const sourceUrl = `${location.origin}${location.pathname}`;
+        const documentProfile = specialty || license ? {
+          kind: "public_professional_profile",
+          source_label: "NPI No.",
+          source_url: sourceUrl,
+          headline: specialty,
+          summary: `${name} is listed in the NPI registry with NPI ${detailNpi}${specialty ? ` and specialty ${specialty}` : ""}.`,
+          credentials: credential ? [credential] : [],
+          specialties: specialty ? [specialty] : [],
+          subspecialties: [], hospitals: [], education: [],
+          licenses: license ? [license] : [], certifications: [], languages: [],
+          npi: detailNpi,
+          address: "",
+          location: "",
+        } : null;
+        const profile = {
+          name,
+          location: "",
+          headline: specialty || providerProfession(credential ? [credential] : []),
+          notes: profileNotes({ npi: detailNpi, specialty, license }),
+          roles: specialty ? [specialty] : [],
+          employers: [], schools: [], licenses: license ? [license] : [], certifications: [],
+          profile_document: documentProfile || undefined,
+          source: PLATFORM.key, source_url: sourceUrl, source_id: detailNpi,
+          captured_at: new Date().toISOString(),
+        };
+        profiles.push(profile);
+        elements.set(detailNpi, document.documentElement);
+      }
+      return { profiles, elements };
+    }
     for (const link of all('h2 a[href], h3 a[href]')) {
       const href = absoluteUrl(link.getAttribute("href"));
       let parsed;

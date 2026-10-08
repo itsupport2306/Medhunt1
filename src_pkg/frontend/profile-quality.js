@@ -7,8 +7,8 @@
   const MAX_PROFILES = 100;
   const CREDENTIALS = new Set([
     "acls", "aprn", "bls", "bsn", "cna", "cnor", "crna", "cst", "dnp",
-    "do", "lpn", "lvn", "ma", "mba", "md", "msn", "np", "pals", "pccn", "phd",
-    "phn", "rma", "rn",
+    "do", "dds", "dmd", "lpn", "lvn", "ma", "mba", "md", "ms", "msn", "np", "pa", "pac", "pals", "pccn", "phd",
+    "phn", "physicianassistant", "rma", "rn", "rpac", "scd",
   ]);
   const NON_PERSON_LABELS = new Set([
     "add friend", "candidate", "candidates", "connect", "contact info",
@@ -49,6 +49,7 @@
 
   function normalizeName(value) {
     let name = cleanText(value, 140)
+      .replace(/^(?:dr\.?|doctor|mr\.?|mrs\.?|ms\.?|miss)\s+/i, "")
       .replace(/\s+(?:\u00b7|\u2022)\s*(?:1st|2nd|3rd\+?|out of network).*$/i, "")
       .replace(/\s*\([^()]{1,100}\)\s*/g, " ")
       .replace(/\s+[\u2013\u2014-]\s+(?:registered\s+nurse|licensed\s+practical\s+nurse|nurse|rn|lpn|lvn)\b.*$/i, "")
@@ -135,6 +136,7 @@
       if (platform === "usnews") {
         return /^\/(?:doctors|nurse-practitioners|physician-assistants|dentists)(?:\/|$)/i.test(url.pathname);
       }
+      if (platform === "npino") return /^\/[^/]+\/\d{10}(?:-[^/]*)?\/?$/i.test(url.pathname);
       if (platform === "medifind") return /^\/doctors\/[^/?#]+\/\d+\/?$/i.test(url.pathname);
       if (platform === "commonspirit") return /^\/find-a-doctor\/[^/?#]+-\d+\/?$/i.test(url.pathname);
       if (platform === "sharecare") return /^\/doctor\/[^/?#]+\/?$/i.test(url.pathname);
@@ -162,7 +164,7 @@
 
   function sanitizeProfileDocument(value, platform, sourceUrl) {
     if (
-      !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(platform) || !value || typeof value !== "object"
+      !["usnews", "medifind", "commonspirit", "sharecare", "webmd", "npino"].includes(platform) || !value || typeof value !== "object"
       || value.kind !== "public_professional_profile"
     ) return null;
     const documentUrl = cleanText(value.source_url || sourceUrl, 1200);

@@ -45,6 +45,8 @@ from sourcing import (
     healthboard_auth,
     quick_sourcer_client,
     profile_resume,
+    ceipal_delivery,
+    contact_lookup_queue,
     zoom_sms,
 )
 
@@ -55,6 +57,47 @@ config.STORAGE_ENABLED = False
 config.DEMO_MODE = True
 config.PDL_API_KEY = ""
 config.PDL_ENABLED = False
+
+
+def test_ceipal_delivery_accepts_email_or_phone_without_resume(monkeypatch):
+    delivered = []
+    saved = []
+    monkeypatch.setattr(store, "get_candidate", lambda cid: {"id": cid, "name": "Jane Smith", "location": "Boston, MA"})
+    monkeypatch.setattr(store, "get_candidate_ats_route", lambda cid, owner: {
+        "destination": "ceipal", "eligibility": {},
+    })
+    monkeypatch.setattr(store, "set_candidate_ats_route", lambda *args: saved.append(args))
+    monkeypatch.setattr(healthboard_auth, "medhunt_ceipal_candidate", lambda **kwargs: (
+        delivered.append(kwargs) or {"state": "uploaded_to_ceipal", "applicant_id": "app-1"}
+    ))
+    for emails, phones in [(["jane@example.test"], []), ([], ["+16175550100"])]:
+        monkeypatch.setattr(contact_access, "project_candidate", lambda _candidate: {
+            "contacts_trusted": True, "emails": emails, "phones": phones,
+            "phone_contacts": [{"value": value, "kind": "mobile"} for value in phones],
+        })
+        assert ceipal_delivery.upload_candidate(12, "recruiter-1") == "uploaded"
+        assert delivered[-1]["candidate"]["emails"] == emails
+        assert delivered[-1]["candidate"]["phones"] == phones
+    assert len(saved) == 2
+
+
+def test_ceipal_upload_follows_terminal_contact_lookup(monkeypatch):
+    events = []
+    monkeypatch.setattr(store, "contact_lookup_paused", lambda owner: False)
+    monkeypatch.setattr(store, "get_candidate", lambda cid: {"id": cid, "name": "Jane Smith"})
+    monkeypatch.setattr(quick_sourcer_client, "configured", lambda: True)
+    monkeypatch.setattr(quick_sourcer_client, "lookup_candidate", lambda *args, **kwargs: {
+        "status": "found", "emails": ["jane@example.test"], "phones": [],
+    })
+    monkeypatch.setattr(contact_lookup_queue.ats_routing, "set_candidate_target", lambda *args: events.append("route"))
+    monkeypatch.setattr(contact_lookup_queue, "_terminal", lambda *args: events.append("terminal") or {"status": "succeeded"})
+    monkeypatch.setattr(ceipal_delivery, "upload_candidate", lambda *args: events.append("ceipal"))
+    result = contact_lookup_queue._process_job({
+        "id": 1, "candidate_id": 12, "requested_by": "recruiter-1",
+        "delivery_target": "ceipal", "job_source": "extension",
+    })
+    assert result == {"status": "succeeded"}
+    assert events == ["route", "terminal", "ceipal"]
 
 
 def test_public_api_requires_healthboard_session_without_origin_header(monkeypatch):
@@ -3286,7 +3329,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             assert single_lookup.status_code == 200
             assert set(single_lookup.json()) == {
                 "status", "emails", "phones", "phone_contacts",
-                "resume_required", "location_match",
+                "resume_required", "location_match", "ats_destination",
             }
             assert (await client.post(f"/jobs/{job_id}/rank")).json()["ranked"] == 1
 
@@ -3330,7 +3373,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             assert all(
                 set(result) == {
                     "status", "emails", "phones", "phone_contacts",
-                    "resume_required", "location_match",
+                    "resume_required", "location_match", "ats_destination",
                 }
                 for result in batch_body["results"].values()
             )
@@ -3628,6 +3671,28 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
                 json=sharecare_body,
             )
             assert sharecare_resume.status_code == 200, sharecare_resume.text
+
+            npino_id = store.add_candidate(
+                "Ayumi E Belanger", "Green Cove Springs, FL", source="npino",
+                source_url="https://npino.com/nurse/1003001058-ms.-ayumi-e-belanger/",
+                source_id="1003001058",
+            )
+            npino_body = {
+                **sharecare_body,
+                "source_label": "NPI No.",
+                "source_url": "https://npino.com/nurse/1003001058-ms.-ayumi-e-belanger/",
+                "headline": "Physician Assistant - Medical",
+                "summary": "Ayumi E Belanger is listed in the NPI registry with NPI 1003001058.",
+                "specialties": ["Physician Assistant - Medical"],
+                "hospitals": [], "education": [], "certifications": [],
+                "licenses": ["PA12345"], "npi": "1003001058",
+                "address": "", "location": "",
+            }
+            npino_resume = await client.post(
+                f"/candidates/{npino_id}/professional-profile-resume", json=npino_body,
+            )
+            assert npino_resume.status_code == 200, npino_resume.text
+            assert npino_resume.json()["resume"]["filename"].endswith(".pdf")
             assert sharecare_resume.json()["resume"]["filename"].endswith(".pdf")
 
             wrong_sharecare_url = await client.post(
@@ -3827,7 +3892,7 @@ def test_frontend_is_manifest_v3_compatible():
     assert 'key: "usnews"' in app_script
     assert 'key: "medifind"' in app_script
     assert "professional-profile-resume" in app_script
-    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd"])' in app_script
+    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd", "npino"])' in app_script
     assert 'key: "sharecare"' in app_script
     assert "captureProfessionalProfileInBackground" in app_script
     assert "startProfessionalProfileResumeBatch" in app_script
@@ -4252,7 +4317,6 @@ def test_frontend_locks_captured_candidates_during_lookup():
     assert "let indeedScanGeneration = 0;" in app_script
     assert "let indeedLookupProfiles = [];" in app_script
     assert "indeedLookupProfiles = profiles.slice();" in app_script
-    assert 'indeedLookupFor(profile)?.status === "not_found"' in app_script
     assert 'indeedLookupFor(profile)?.status === "failed"' in app_script
     assert "No candidates in this result filter" in app_script
     assert "scanGeneration !== indeedScanGeneration" in app_script

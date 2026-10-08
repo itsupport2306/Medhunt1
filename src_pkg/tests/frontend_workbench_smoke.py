@@ -254,6 +254,21 @@ def _run_browser(browser_type, executable: Path) -> dict:
     assert "candidates captured" not in page.locator("body").inner_text().lower()
     assert page.locator(".capture-row").count() == 50
     assert page.locator(".candidate-select-control").count() == 50
+    page.evaluate("""() => {
+      rememberEnrichedProfile(indeedCandidates[0]);
+      indeedSelected = new Set();
+      toggleAllIndeedCandidates();
+      renderIndeedProfiles();
+    }""")
+    assert page.locator(".capture-row.previously-enriched").count() == 1
+    assert page.locator(".already-enriched-badge").inner_text() == "Already enriched"
+    assert page.locator(".capture-row.previously-enriched input").is_disabled()
+    assert page.evaluate("() => !indeedSelected.has(indeedCandidates[0]._selectionKey)")
+    page.evaluate("""() => {
+      enrichedProfileKeys.clear();
+      indeedSelected = new Set(indeedCandidates.map(profile => profile._selectionKey));
+      renderIndeedProfiles();
+    }""")
     assert page.locator(".source-brand-copy strong").inner_text() == "Medhunt"
     assert page.locator(".medhunt-mark").count() == 1
     assert page.locator(".radixsol-mark").count() == 0
@@ -382,7 +397,7 @@ def _run_browser(browser_type, executable: Path) -> dict:
     assert page.locator('[role=tab][data-filter="all"]').get_attribute("aria-selected") == "true"
     assert page.locator(".capture-row").count() == 50
     assert "Ready" in page.locator(".result-summary").inner_text()
-    assert "Retry" in page.locator(".result-summary").inner_text()
+    assert "Unavailable" in page.locator(".result-summary").inner_text()
 
     matched_tab = page.locator('[role=tab][data-filter="matched"]')
     matched_tab.click()

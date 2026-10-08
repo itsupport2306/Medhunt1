@@ -1303,6 +1303,21 @@ body.extension-shell .indeed-candidate-list {
   border-color: #9bcfc8;
 }
 .capture-row.selected::before { background: var(--rx-teal); }
+.capture-row.previously-enriched {
+  border-color: #96cfc1;
+  background: #effaf5;
+}
+.capture-row.previously-enriched::before { background: #208665; }
+.capture-row .already-enriched-badge {
+  grid-column: 2 / -1;
+  width: fit-content;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: #126348;
+  background: #d9f1e5;
+  font-size: 11px;
+  font-weight: 700;
+}
 .candidate-select-control {
   width: 40px;
   min-height: 44px;
