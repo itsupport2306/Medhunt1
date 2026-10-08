@@ -81,7 +81,7 @@ def test_ceipal_delivery_accepts_email_or_phone_without_resume(monkeypatch):
     assert len(saved) == 2
 
 
-def test_ceipal_upload_follows_terminal_contact_lookup(monkeypatch):
+def test_ceipal_upload_waits_for_resume_after_contact_lookup(monkeypatch):
     events = []
     monkeypatch.setattr(store, "contact_lookup_paused", lambda owner: False)
     monkeypatch.setattr(store, "get_candidate", lambda cid: {"id": cid, "name": "Jane Smith"})
@@ -91,13 +91,50 @@ def test_ceipal_upload_follows_terminal_contact_lookup(monkeypatch):
     })
     monkeypatch.setattr(contact_lookup_queue.ats_routing, "set_candidate_target", lambda *args: events.append("route"))
     monkeypatch.setattr(contact_lookup_queue, "_terminal", lambda *args: events.append("terminal") or {"status": "succeeded"})
-    monkeypatch.setattr(ceipal_delivery, "upload_candidate", lambda *args: events.append("ceipal"))
     result = contact_lookup_queue._process_job({
         "id": 1, "candidate_id": 12, "requested_by": "recruiter-1",
         "delivery_target": "ceipal", "job_source": "extension",
     })
     assert result == {"status": "succeeded"}
-    assert events == ["route", "terminal", "ceipal"]
+    assert events == ["route", "terminal"]
+
+
+def test_ceipal_upload_runs_after_resume_is_stored(monkeypatch):
+    from pypdf import PdfWriter
+    from io import BytesIO
+
+    store.reset()
+    candidate_id = store.add_candidate(
+        "Jane Smith", "Boston, MA", source="indeed",
+        source_url="https://employers.indeed.com/profile/jane", source_id="jane-123",
+    )
+    store.set_candidate_ats_route(candidate_id, "recruiter-1", "ceipal")
+    events = []
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    pdf = BytesIO()
+    writer.write(pdf)
+
+    monkeypatch.setattr(contact_access, "project_candidate", lambda _candidate: {
+        "contacts_trusted": True, "emails": ["jane@example.test"],
+        "phones": [], "phone_contacts": [],
+    })
+    monkeypatch.setattr(api_module.resume_extraction, "extract", lambda *args: {})
+    monkeypatch.setattr(api_module.resume_enrichment, "add_contact_sheet", lambda data, _candidate: (data, False))
+    attach = store.attach_resume
+    def attach_then_record(*args, **kwargs):
+        resume = attach(*args, **kwargs)
+        events.append("resume_stored")
+        return resume
+    monkeypatch.setattr(store, "attach_resume", attach_then_record)
+    monkeypatch.setattr(api_module, "_upload_ceipal_candidate", lambda cid, user: events.append(("ceipal", cid, user)) or "uploaded")
+
+    result = api_module._store_resume_pdf(
+        candidate_id, "jane.pdf", pdf.getvalue(), "recruiter-1",
+    )
+    assert events == ["resume_stored", ("ceipal", candidate_id, "recruiter-1")]
+    assert result["ceipal_sync_status"] == "uploaded"
+    assert api_module._public_resume(result)["ceipal_sync_status"] == "uploaded"
 
 
 def test_public_api_requires_healthboard_session_without_origin_header(monkeypatch):

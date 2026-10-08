@@ -512,6 +512,7 @@ def _public_resume(resume: dict | None) -> dict:
     allowed = (
         "id", "candidate_id", "filename", "mime_type", "size", "created",
         "deduplicated", "contact_sheet_embedded", "contacts_saved",
+        "ceipal_sync_status",
     )
     return {key: source.get(key) for key in allowed if key in source}
 
@@ -1251,16 +1252,18 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
         )
         if destination == "ceipal":
             ceipal_sync_status = _upload_ceipal_candidate(cid, user_id)
-        return {
+        result = {
             **existing,
             "contact_sheet_embedded": contact_sheet_embedded,
             "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
             "deduplicated": True,
-            "ceipal_sync_status": ceipal_sync_status,
             "nexus_sync_status": (
                 nexus_delivery_job.get("status") if nexus_delivery_job else nexus_skip_status
             ),
         }
+        if destination == "ceipal":
+            result["ceipal_sync_status"] = ceipal_sync_status
+        return result
     if storage.enabled():
         try:
             uploaded = storage.upload_resume(cid, filename, data)
@@ -1289,8 +1292,9 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
         **resume,
         "contact_sheet_embedded": contact_sheet_embedded,
         "contacts_saved": bool(contactable.get("phones") or contactable.get("emails")),
-        "ceipal_sync_status": ceipal_sync_status,
     }
+    if destination == "ceipal":
+        result["ceipal_sync_status"] = ceipal_sync_status
     if not queue_nexus:
         result["nexus_sync_status"] = nexus_skip_status
     return result

@@ -7,7 +7,7 @@ import threading
 import time
 
 from . import (
-    ats_routing, ceipal_delivery, config, healthboard_auth, nexus_delivery,
+    ats_routing, config, healthboard_auth, nexus_delivery,
     quick_sourcer_client, store,
 )
 
@@ -136,16 +136,6 @@ def _process_job(job: dict) -> dict:
             except Exception as exc:
                 logging.getLogger("medhunt.nexus").warning(
                     "Nexus queueing deferred for candidate %s (%s).",
-                    candidate_id, type(exc).__name__,
-                )
-        if found and destination == "ceipal":
-            # A Ceipal applicant needs verified contact data, not a resume.
-            # Complete the lookup first so a slow ATS never holds the browser.
-            try:
-                ceipal_delivery.upload_candidate(candidate_id, user_id)
-            except Exception as exc:
-                logging.getLogger("medhunt.ceipal").warning(
-                    "Ceipal upload deferred for candidate %s (%s).",
                     candidate_id, type(exc).__name__,
                 )
         return terminal
