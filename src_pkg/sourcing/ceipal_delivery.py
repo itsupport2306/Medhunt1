@@ -16,8 +16,8 @@ def upload_candidate(candidate_id: int, user_id: str) -> str:
         return "disabled"
     eligibility = dict(route.get("eligibility") or {})
     previous = eligibility.get("ceipal_upload") or {}
-    if previous.get("state") == "uploaded_to_ceipal":
-        return "uploaded"
+    if previous.get("state") in {"uploaded_to_ceipal", "already_in_ceipal"}:
+        return "uploaded" if previous.get("state") == "uploaded_to_ceipal" else "already_in_ceipal"
 
     projected = contact_access.project_candidate(candidate)
     if not projected.get("contacts_trusted") or not (
@@ -45,7 +45,7 @@ def upload_candidate(candidate_id: int, user_id: str) -> str:
         eligibility["ceipal_upload"] = {
             "state": state,
             "applicant_id": str(result.get("applicant_id") or ""),
-            "checked": False,
+            "checked": bool(result.get("checked", True)),
         }
         store.set_candidate_ats_route(candidate_id, owner, "ceipal", eligibility)
         return "uploaded" if state == "uploaded_to_ceipal" else state

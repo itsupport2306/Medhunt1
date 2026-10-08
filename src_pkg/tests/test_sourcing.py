@@ -81,6 +81,20 @@ def test_ceipal_delivery_accepts_email_or_phone_without_resume(monkeypatch):
     assert len(saved) == 2
 
 
+def test_ceipal_duplicate_result_is_idempotent(monkeypatch):
+    monkeypatch.setattr(store, "get_candidate", lambda cid: {"id": cid, "name": "Jane Smith"})
+    monkeypatch.setattr(store, "get_candidate_ats_route", lambda cid, owner: {
+        "destination": "ceipal",
+        "eligibility": {"ceipal_upload": {"state": "already_in_ceipal", "applicant_id": "app-1"}},
+    })
+    def unexpected_submission(**kwargs):
+        raise AssertionError("confirmed CEIPAL duplicate should not be submitted again")
+
+    monkeypatch.setattr(healthboard_auth, "medhunt_ceipal_candidate", unexpected_submission)
+
+    assert ceipal_delivery.upload_candidate(12, "recruiter-1") == "already_in_ceipal"
+
+
 def test_ceipal_upload_waits_for_resume_after_contact_lookup(monkeypatch):
     events = []
     monkeypatch.setattr(store, "contact_lookup_paused", lambda owner: False)
