@@ -191,6 +191,69 @@ def test_actual_candidate_specialty_overrides_generic_default_and_aligns_profess
     assert result["nexus_candidate_id"] == 705
 
 
+@pytest.mark.parametrize(("job_title", "specialty"), [
+    ("RN Case Manager", "Case Manager"),
+    ("Hemodialysis Registered Nurse", "Dialysis"),
+    ("RN ICU", "ICU"),
+])
+def test_current_role_supplies_approved_nexus_specialty(job_title, specialty):
+    def handler(request):
+        if request.url.path.endswith("/master/specialties"):
+            return httpx.Response(200, json=[
+                {"specialtyId": 321, "professionId": 10, "name": specialty, "active": True},
+                {"specialtyId": 20, "professionId": 10, "name": "Unknown", "active": True},
+            ])
+        if request.url.path.endswith("/candidate/webhook/create"):
+            content = request.content.decode("latin-1")
+            assert '"professionId":10' in content
+            assert '"specialtyId":321' in content
+            return httpx.Response(201, json={"id": 720})
+        raise AssertionError(request.url)
+
+    settings = _settings()
+    result = nexus_sync.process_delivery(
+        _payload(job_title=job_title), PDF,
+        settings=settings, client=_client(settings, handler),
+    )
+    assert result["nexus_candidate_id"] == 720
+
+
+def test_source_specialty_precedes_role_in_nexus_classification():
+    def handler(request):
+        if request.url.path.endswith("/master/specialties"):
+            return httpx.Response(200, json=[
+                {"specialtyId": 321, "professionId": 10, "name": "Dialysis", "active": True},
+                {"specialtyId": 322, "professionId": 10, "name": "ICU", "active": True},
+            ])
+        if request.url.path.endswith("/candidate/webhook/create"):
+            content = request.content.decode("latin-1")
+            assert '"specialtyId":321' in content
+            return httpx.Response(201, json={"id": 721})
+        raise AssertionError(request.url)
+
+    settings = _settings()
+    result = nexus_sync.process_delivery(
+        _payload(job_title="RN ICU", notes="Specialty: Dialysis"), PDF,
+        settings=settings, client=_client(settings, handler),
+    )
+    assert result["nexus_candidate_id"] == 721
+
+
+def test_stored_resume_specialty_is_read_only_during_nexus_delivery():
+    payload = _payload(job_title="Registered Nurse")
+    payload["resume_extraction"] = {
+        "fields": {"specialties": ["ICU", "OR"]},
+        "confidence": {"specialties": 0.76},
+        "accepted": {},
+        "conflicts": [],
+    }
+    identity = nexus_sync._trusted_identity(payload)
+    assert identity["source_specialties"] == []
+    assert identity["resume_specialties"] == ["ICU"]
+    payload["resume_extraction"]["conflicts"] = ["name"]
+    assert nexus_sync._trusted_identity(payload)["resume_specialties"] == []
+
+
 def test_unmatched_candidate_specialty_uses_unknown_classification():
     def handler(request):
         if request.url.path.endswith("/candidates/search"):

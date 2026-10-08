@@ -46,7 +46,24 @@ _SPECIALTY_ALIASES: Mapping[str, tuple[str, ...]] = {
     "ob gyn": ("Obstetrics & Gynecology",),
     "obgyn": ("Obstetrics & Gynecology",),
     "obstetrics and gynecology": ("Obstetrics & Gynecology",),
+    "or": ("Operating Room",),
+    "er": ("Emergency Room",),
 }
+
+_ROLE_SPECIALTY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("Sterile Processing Tech (SPT)", re.compile(r"\bsterile\s+processing\s+tech(?:nician)?\b", re.I)),
+    ("Interventional Radiology Tech", re.compile(r"\binterventional\s+radiology\s+tech(?:nician|nologist)?\b", re.I)),
+    ("CT Tech", re.compile(r"\bct\s+tech(?:nician|nologist)?\b", re.I)),
+    ("MRI Tech", re.compile(r"\bmri\s+tech(?:nician|nologist)?\b", re.I)),
+    ("X-Ray Tech", re.compile(r"\bx[ -]?ray\s+tech(?:nician|nologist)?\b", re.I)),
+    ("X-Ray Tech", re.compile(r"\bradiologic\s+technolog(?:ist|y)\b", re.I)),
+    ("Long Term Acute Care (LTAC)", re.compile(r"\b(?:ltac|long\s+term\s+acute\s+care)\b", re.I)),
+    ("MedSurg / Tele", re.compile(r"\bmed(?:ical)?[ -]?surg(?:ical)?.{0,20}\btele(?:metry)?\b", re.I)),
+    ("MedSurg", re.compile(r"\bmed(?:ical)?[ -]?surg(?:ical)?\b", re.I)),
+    ("Post-Partum", re.compile(r"\bpost[ -]?partum\b", re.I)),
+    ("Psychiatric-Mental Health", re.compile(r"\b(?:psychiatric[ -]?mental\s+health|mental\s+health\s+nurse\s+practitioner|pmhnp)\b", re.I)),
+    ("Dialysis", re.compile(r"\bhemodialysis\b", re.I)),
+)
 
 
 class NexusDeliveryError(RuntimeError):
@@ -823,6 +840,36 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
         state = parsed_state
     if not country and len(parts) >= 3:
         country = parts[-1]
+    source_specialties = _candidate_specialties(candidate, {})
+    resume_specialties = _text_values([
+        *_text_values(accepted.get("specialty")),
+        *_text_values(accepted.get("specialties")),
+    ])
+    if not resume_specialties and isinstance(extraction, Mapping):
+        # Older captures already stored this structured field. Read it only
+        # during Nexus delivery so resume capture and downloads stay untouched.
+        fields = extraction.get("fields")
+        confidence = extraction.get("confidence")
+        conflicts = extraction.get("conflicts") or []
+        try:
+            specialty_confidence = float(
+                confidence.get("specialties") if isinstance(confidence, Mapping) else 0
+            )
+        except (TypeError, ValueError):
+            specialty_confidence = 0
+        if (
+            isinstance(fields, Mapping)
+            and specialty_confidence >= 0.75
+            and "name" not in conflicts
+        ):
+            # The existing parser matches short acronyms without case context.
+            # Avoid treating ordinary prose such as "or" as a clinical unit.
+            extracted = [
+                value for value in _text_values(fields.get("specialties"))
+                if value.casefold() not in {"or", "er"}
+            ]
+            if len(extracted) == 1:
+                resume_specialties = extracted
     return {
         "firstName": first_name,
         "middleName": middle_name,
@@ -839,7 +886,9 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
             or accepted.get("job_title")
             or ""
         ).strip(),
-        "specialties": _candidate_specialties(candidate, accepted),
+        "source_specialties": source_specialties,
+        "resume_specialties": resume_specialties,
+        "specialties": _text_values([*source_specialties, *resume_specialties]),
     }
 
 
@@ -929,6 +978,17 @@ def _profession_labels(role: str) -> tuple[str, ...]:
     if taxonomy_labels:
         return taxonomy_labels
     return ("Unknown",)
+
+
+def _role_specialty_labels(
+    role: str, profession_values: Sequence[str],
+) -> tuple[str, ...]:
+    labels = [
+        label for label, pattern in _ROLE_SPECIALTY_PATTERNS
+        if pattern.search(str(role or ""))
+    ]
+    labels.extend(nexus_taxonomy.specialty_labels_for_role(role, profession_values))
+    return tuple(_text_values(labels))
 
 
 def _exact_master_id(
@@ -1198,9 +1258,19 @@ def _build_profile(
             profile["referralSourceId"] = next(iter(ids))
 
     role = str(identity.get("role") or "")
-    actual_specialties = _text_values(identity.get("specialties"))
     initial_profession_values = (
         (profession_name,) if profession_name else _profession_labels(role)
+    )
+    source_specialties = _text_values(identity.get("source_specialties"))
+    resume_specialties = _text_values(identity.get("resume_specialties"))
+    if "source_specialties" not in identity and "resume_specialties" not in identity:
+        source_specialties = _text_values(identity.get("specialties"))
+    # Current source data has priority; a role/title is more current than
+    # resume-wide terms, which can mention several historical clinical units.
+    actual_specialties = (
+        source_specialties
+        or _text_values(_role_specialty_labels(role, initial_profession_values))
+        or resume_specialties
     )
     taxonomy_row = nexus_taxonomy.classify(
         initial_profession_values, actual_specialties,

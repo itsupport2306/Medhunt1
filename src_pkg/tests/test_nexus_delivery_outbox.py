@@ -27,6 +27,15 @@ def test_role_prefers_clinical_resume_role_over_mislabeled_employer():
     }
 
     assert nexus_delivery._role(candidate) == "RN"
+
+
+def test_accepted_resume_role_is_used_when_platform_title_is_an_employer():
+    candidate = {"job_title": "SHAWNEE MANOR", "notes": "Headline: SHAWNEE MANOR"}
+    extraction = {"accepted": {"job_title": "RN ICU"}}
+
+    assert nexus_delivery._role(candidate, extraction) == "RN ICU"
+
+
 import api as api_module
 
 
