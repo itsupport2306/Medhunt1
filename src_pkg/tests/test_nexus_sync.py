@@ -199,6 +199,11 @@ def test_actual_candidate_specialty_overrides_generic_default_and_aligns_profess
             assert '"professionIds":[77]' in content
             assert '"specialtyId":20' not in content
             return httpx.Response(201, json={"id": 705})
+        if request.url.path.endswith("/candidates/705") and request.method == "GET":
+            return httpx.Response(200, json={
+                "professionIds": [77], "specialtyIds": [321],
+                "primarySpecialtyId": 321,
+            })
         raise AssertionError(request.url)
 
     settings = _settings()
@@ -207,6 +212,7 @@ def test_actual_candidate_specialty_overrides_generic_default_and_aligns_profess
         settings=settings, client=_client(settings, handler),
     )
     assert result["nexus_candidate_id"] == 705
+    assert result["classification_updated"] is False
 
 
 @pytest.mark.parametrize(("job_title", "specialty"), [
@@ -248,6 +254,11 @@ def test_source_specialty_precedes_role_in_nexus_classification():
             assert '"specialtyId":321' in content
             assert '"specialtyIds":[321,322]' in content
             return httpx.Response(201, json={"id": 721})
+        if request.url.path.endswith("/candidates/721") and request.method == "GET":
+            return httpx.Response(200, json={
+                "professionIds": [10], "specialtyIds": [321],
+                "primarySpecialtyId": 321,
+            })
         raise AssertionError(request.url)
 
     settings = _settings()
@@ -256,6 +267,7 @@ def test_source_specialty_precedes_role_in_nexus_classification():
         settings=settings, client=_client(settings, handler),
     )
     assert result["nexus_candidate_id"] == 721
+    assert result["classification_updated"] is False
 
 
 def test_stored_resume_specialty_is_read_only_during_nexus_delivery():
@@ -304,6 +316,11 @@ def test_new_candidate_creation_sends_nursing_resume_specialty_to_nexus():
             assert '"specialtyIds":[321,322]' in content
             assert '"primarySpecialtyId":321' in content
             return httpx.Response(201, json={"id": 722})
+        if request.url.path.endswith("/candidates/722") and request.method == "GET":
+            return httpx.Response(200, json={
+                "professionIds": [10], "specialtyIds": [321],
+                "primarySpecialtyId": 321,
+            })
         raise AssertionError(request.url)
 
     settings = _settings()
@@ -311,6 +328,55 @@ def test_new_candidate_creation_sends_nursing_resume_specialty_to_nexus():
         payload, PDF, settings=settings, client=_client(settings, handler),
     )
     assert result["nexus_candidate_id"] == 722
+    assert result["classification_updated"] is False
+
+
+@pytest.mark.parametrize("stored_primary", [20, 999])
+def test_new_candidate_specialty_is_corrected_when_nexus_changes_it(stored_primary):
+    payload = _payload(job_title="Registered Nurse")
+    payload["resume_extraction"] = {
+        "fields": {"job_title": "ICU Registered Nurse", "specialties": ["ICU", "Med Surg"]},
+        "confidence": {"job_title": 0.82, "specialties": 0.76},
+        "accepted": {}, "conflicts": [],
+    }
+    patched = False
+
+    def handler(request):
+        nonlocal patched
+        if request.url.path.endswith("/master/specialties"):
+            return httpx.Response(200, json=[
+                {"specialtyId": 321, "professionId": 10, "name": "ICU", "active": True},
+                {"specialtyId": 322, "professionId": 10, "name": "Med Surg", "active": True},
+                {"specialtyId": 20, "professionId": 10, "name": "Unknown", "active": True},
+                {"specialtyId": 999, "professionId": 10, "name": "Charge", "active": True},
+            ])
+        if request.url.path.endswith("/candidate/webhook/create"):
+            return httpx.Response(201, json={"id": 723})
+        if request.url.path.endswith("/candidates/723") and request.method == "GET":
+            primary = 321 if patched else stored_primary
+            return httpx.Response(200, json={
+                "professionIds": [10], "specialtyIds": [primary],
+                "primarySpecialtyId": primary,
+            })
+        if request.url.path.endswith("/candidates/723") and request.method == "PATCH":
+            assert json.loads(request.content) == {
+                "professionIds": [10], "specialtyIds": [321, 322],
+                "primarySpecialtyId": 321,
+            }
+            patched = True
+            return httpx.Response(200, json={"id": 723})
+        raise AssertionError(request.url)
+
+    settings = _settings()
+    writes = []
+    result = nexus_sync.process_delivery(
+        payload, PDF, settings=settings, client=_client(settings, handler),
+        before_write=writes.append,
+    )
+
+    assert result["classification_updated"] is True
+    assert result["nexus_candidate_id"] == 723
+    assert writes == ["candidate_creation"]
 
 
 def test_linked_candidate_unknown_specialty_is_updated_before_resume_upload():
@@ -469,6 +535,11 @@ def test_candidate_specialty_uses_reviewed_nexus_alias(source_label, nexus_label
             assert '"professionId":10' in content
             assert '"specialtyId":321' in content
             return httpx.Response(201, json={"id": 708})
+        if request.url.path.endswith("/candidates/708") and request.method == "GET":
+            return httpx.Response(200, json={
+                "professionIds": [10], "specialtyIds": [321],
+                "primarySpecialtyId": 321,
+            })
         raise AssertionError(request.url)
 
     settings = _settings()
@@ -477,6 +548,7 @@ def test_candidate_specialty_uses_reviewed_nexus_alias(source_label, nexus_label
         settings=settings, client=_client(settings, handler),
     )
     assert result["nexus_candidate_id"] == 708
+    assert result["classification_updated"] is False
 
 
 def test_primary_email_must_belong_to_trusted_filtered_email_list():
