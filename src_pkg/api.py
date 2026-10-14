@@ -1198,8 +1198,8 @@ def create_campaign(body: CampaignCreateIn):
         raise HTTPException(400, str(exc))
 
 
-def _upload_ceipal_candidate(candidate_id: int, user_id: str) -> str:
-    return ceipal_delivery.upload_candidate(candidate_id, user_id)
+def _upload_ceipal_candidate(candidate_id: int, resume_id: int, user_id: str) -> str:
+    return ceipal_delivery.upload_candidate(candidate_id, user_id, resume_id)
 
 
 def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "local"):
@@ -1252,7 +1252,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
             if queue_nexus else None
         )
         if destination == "ceipal":
-            ceipal_sync_status = _upload_ceipal_candidate(cid, user_id)
+            ceipal_sync_status = _upload_ceipal_candidate(cid, int(existing["id"]), user_id)
         result = {
             **existing,
             "contact_sheet_embedded": contact_sheet_embedded,
@@ -1288,7 +1288,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
             extraction=extraction,
         )
     if destination == "ceipal":
-        ceipal_sync_status = _upload_ceipal_candidate(cid, user_id)
+        ceipal_sync_status = _upload_ceipal_candidate(cid, int(resume["id"]), user_id)
     result = {
         **resume,
         "contact_sheet_embedded": contact_sheet_embedded,
