@@ -4619,3 +4619,147 @@ def test_zoom_sms_rejects_messages_over_29_words_before_calling_zoom(monkeypatch
             assert sent_messages == []
 
     asyncio.run(exercise())
+
+
+def test_nexus_classification_selection_validates_and_requeues_linked_candidate(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    candidate_id = store.add_candidate("Raja Flores", "Columbus, OH", source="sharecare")
+    resume = store.attach_resume(candidate_id, "raja.pdf", b"%PDF-test", queue_nexus=True)
+    delivery = store.get_nexus_delivery_for_resume(resume["id"])
+    store.save_nexus_candidate_link(delivery["identity_key"], candidate_id, "9001")
+    store.finish_nexus_delivery(delivery["id"], "succeeded", nexus_candidate_id="9001")
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_taxonomy_rows", lambda user: [
+        {"offering": "Physician", "profession": "Physician",
+         "specialty": "Hematology/Oncology"},
+    ])
+    monkeypatch.setattr(api_module.nexus_delivery, "queue_latest_resume_if_ready", lambda cid, user, **kwargs: {
+        "resume_id": resume["id"],
+    })
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            options = await client.get("/nexus/taxonomy")
+            assert options.status_code == 200
+            assert options.json()["rows"][0]["offering"] == "Physician"
+            invalid = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Nursing",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert invalid.status_code == 422
+            valid = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert valid.status_code == 200, valid.text
+            assert valid.json()["requeued"] == 1
+
+    asyncio.run(exercise())
+    route = store.get_candidate_ats_route(candidate_id, "local")
+    assert route["eligibility"]["nexus_classification"] == {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology",
+    }
+    assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "pending"
+    assert store.get_nexus_delivery_for_resume(resume["id"])["operation"] == "classification_refresh"
+    payload = api_module.nexus_delivery._payload(
+        store.get_nexus_delivery_for_resume(resume["id"]),
+        store.get_candidate(candidate_id), store.get_resume(candidate_id, resume["id"]),
+    )
+    assert payload["candidate"]["nexus_classification"] == route["eligibility"]["nexus_classification"]
+
+
+def test_nexus_first_upload_waits_for_classification_without_hold_flag(monkeypatch):
+    from pypdf import PdfWriter
+
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    monkeypatch.setattr(api_module.nexus_delivery, "enabled_for", lambda user: True)
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_taxonomy_rows", lambda user: [
+        {"offering": "Physician", "profession": "Physician",
+         "specialty": "Hematology/Oncology"},
+    ])
+    candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(contact_access, "project_candidate", lambda row, **kwargs: {
+        **candidate, "contacts_trusted": True, "emails": ["avery@example.com"], "phones": [],
+    })
+    pdf = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(pdf)
+    resume = api_module._store_resume_pdf(candidate_id, "avery.pdf", pdf.getvalue())
+    assert resume["nexus_sync_status"] == "waiting_for_classification"
+    assert store.get_nexus_delivery_for_resume(resume["id"]) is None
+    assert api_module.nexus_delivery.queue_latest_resume_if_ready(candidate_id) is None
+
+    async def apply_choice():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            waiting = await client.post("/nexus/delivery-summary", json={
+                "candidate_ids": [candidate_id],
+            })
+            assert waiting.status_code == 200
+            assert waiting.json()["waiting_for_classification"] == 1
+            response = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert response.status_code == 200, response.text
+            queued = await client.post("/nexus/delivery-summary", json={
+                "candidate_ids": [candidate_id],
+            })
+            assert queued.json()["waiting_for_classification"] == 0
+            assert queued.json()["pending"] == 1
+
+    asyncio.run(apply_choice())
+    delivery = store.get_nexus_delivery_for_resume(resume["id"])
+    assert delivery["status"] == "pending"
+    assert not api_module.nexus_delivery.classification_pending(candidate_id, "local")
+    payload = api_module.nexus_delivery._payload(
+        delivery, store.get_candidate(candidate_id), store.get_resume(candidate_id, resume["id"]),
+    )
+    assert payload["candidate"]["nexus_classification"] == {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology",
+    }
+
+
+def test_extension_lookup_queue_holds_nexus_before_worker_starts(monkeypatch):
+    store.reset()
+    candidate_id = store.add_candidate("Avery Smith", "Iowa Falls, IA", source="indeed")
+    monkeypatch.setattr(store, "enqueue_contact_lookup_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(healthboard_auth, "medhunt_contact_lookup_limit", lambda user: 80)
+
+    async def enqueue():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/contact-lookup/queue", json={
+                "candidate_ids": [candidate_id], "run_id": "test-run-1234",
+                "confirmed": True, "hold_nexus_classification": True,
+            })
+            assert response.status_code == 200, response.text
+
+    asyncio.run(enqueue())
+    assert api_module.nexus_delivery.classification_pending(candidate_id, "local")
+
+
+def test_nexus_classification_does_not_change_ceipal_candidate_route():
+    store.reset()
+    candidate_id = store.add_candidate("Ceipal Candidate", "Austin, TX", source="indeed")
+    store.set_candidate_ats_route(candidate_id, "local", "ceipal")
+    assert api_module._set_nexus_classification_hold([candidate_id], "local") == []
+    assert api_module._clear_nexus_classification_hold(candidate_id, "local") == {}
+
+    async def apply_choice():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert response.status_code == 409
+
+    asyncio.run(apply_choice())
+    assert store.get_candidate_ats_route(candidate_id, "local")["destination"] == "ceipal"
