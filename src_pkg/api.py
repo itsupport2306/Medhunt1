@@ -35,7 +35,7 @@ from sourcing import (
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
     profile_resume, zoom_sms,
-    contact_lookup_queue, ats_routing, ceipal_delivery, nexus_taxonomy, nexus_sync,
+    contact_lookup_queue, ats_routing, ceipal_delivery,
 )
 
 
@@ -60,7 +60,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.37.8"
+APP_VERSION = "3.37.7"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -242,14 +242,6 @@ class ProfileBatchImportIn(BaseModel):
     search_url: str = ""
 
 
-class NexusClassificationIn(BaseModel):
-    candidate_ids: list[int] = Field(min_length=1, max_length=80)
-    offering: str = Field(min_length=1, max_length=120)
-    profession: str = Field(min_length=1, max_length=120)
-    specialty: str = Field(min_length=1, max_length=240)
-    recruiter_id: int | None = Field(default=None, gt=0)
-
-
 class ResumeDownloadIn(BaseModel):
     path: str
     filename: str = ""
@@ -306,7 +298,6 @@ class ContactLookupBatchIn(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
     run_id: str = Field(min_length=8, max_length=80)
     confirmed: bool = False
-    hold_nexus_classification: bool = False
 
 
 class ContactLookupControlIn(BaseModel):
@@ -649,13 +640,8 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
             "waiting_for_resume": 0, "not_uploaded": 0,
             "enabled": False, "destination": "ceipal", "items": [],
         }
-    user_id = str(actor.get("sub") or "local")
     waiting_resume_ids = []
-    waiting_classification_ids = [
-        candidate_id for candidate_id in body.candidate_ids
-        if nexus_delivery.classification_pending(candidate_id, user_id)
-    ]
-    if nexus_delivery.enabled_for(user_id):
+    if nexus_delivery.enabled_for(str(actor.get("sub") or "local")):
         candidates = store.get_candidates(body.candidate_ids)
         for projected in contact_access.project_candidates(candidates):
             if (
@@ -665,7 +651,6 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
                 waiting_resume_ids.append(int(projected["id"]))
     return store.nexus_delivery_summary(
         body.candidate_ids, waiting_resume_ids=waiting_resume_ids,
-        waiting_classification_ids=waiting_classification_ids,
     )
 
 
@@ -675,9 +660,6 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
     if not body.confirmed:
         raise HTTPException(400, "Confirm the selected candidates before queueing lookup.")
     user_id = str(actor.get("sub") or "local")
-    newly_held = []
-    if body.hold_nexus_classification and ats_routing.destination_for(actor) == "nexus":
-        newly_held = _set_nexus_classification_hold(body.candidate_ids, user_id)
     try:
         items = store.enqueue_contact_lookup_jobs(
             body.run_id, body.candidate_ids, user_id,
@@ -685,8 +667,6 @@ def enqueue_contact_lookups(body: ContactLookupBatchIn, request: Request):
             per_user_limit=healthboard_auth.medhunt_contact_lookup_limit(user_id),
         )
     except store.ContactLookupQueueLimitError as exc:
-        for candidate_id in newly_held:
-            _clear_nexus_classification_hold(candidate_id, user_id)
         raise HTTPException(
             429,
             f"{exc} You currently have {exc.active} active and requested {exc.requested} more.",
@@ -1157,106 +1137,6 @@ def import_candidate_batch(body: ProfileBatchImportIn, request: Request):
     }
 
 
-@app.get("/nexus/taxonomy")
-def nexus_supported_classifications(request: Request):
-    actor = _request_user(request)
-    if ats_routing.destination_for(actor) != "nexus":
-        raise HTTPException(409, "Your organization is assigned to Ceipal.")
-    try:
-        rows = nexus_delivery.supported_taxonomy_rows(str(actor.get("sub") or "local"))
-    except nexus_sync.NexusDeliveryError as exc:
-        raise HTTPException(503, "Nexus classifications are temporarily unavailable.") from exc
-    return {"rows": rows}
-
-
-@app.get("/nexus/recruiters")
-def nexus_supported_recruiters(request: Request):
-    actor = _request_user(request)
-    if ats_routing.destination_for(actor) != "nexus":
-        raise HTTPException(409, "Your organization is assigned to Ceipal.")
-    try:
-        rows = nexus_delivery.supported_recruiters(str(actor.get("sub") or "local"))
-    except nexus_sync.NexusDeliveryError as exc:
-        raise HTTPException(503, "Nexus recruiters are temporarily unavailable.") from exc
-    return {"rows": rows}
-
-
-def _set_nexus_classification_hold(candidate_ids: list[int], user_id: str) -> list[int]:
-    newly_held = []
-    for candidate_id in dict.fromkeys(candidate_ids):
-        if not store.get_candidate(candidate_id):
-            continue
-        route = store.get_candidate_ats_route(candidate_id, user_id)
-        if (route or {}).get("destination") == "ceipal":
-            continue
-        eligibility = dict((route or {}).get("eligibility") or {})
-        if not eligibility.get("nexus_classification_pending"):
-            newly_held.append(candidate_id)
-        eligibility["nexus_classification_pending"] = True
-        store.set_candidate_ats_route(candidate_id, user_id, "nexus", eligibility)
-    return newly_held
-
-
-def _clear_nexus_classification_hold(candidate_id: int, user_id: str) -> dict:
-    route = store.get_candidate_ats_route(candidate_id, user_id)
-    eligibility = dict((route or {}).get("eligibility") or {})
-    if (route or {}).get("destination") == "ceipal":
-        return eligibility
-    eligibility.pop("nexus_classification_pending", None)
-    store.set_candidate_ats_route(candidate_id, user_id, "nexus", eligibility)
-    return eligibility
-
-
-@app.post("/candidates/nexus-classification/batch")
-def set_nexus_classification(body: NexusClassificationIn, request: Request):
-    actor = _request_user(request)
-    if ats_routing.destination_for(actor) != "nexus":
-        raise HTTPException(409, "Your organization is assigned to Ceipal.")
-    row = nexus_taxonomy.selected_row(body.offering, body.profession, body.specialty)
-    if row is None:
-        raise HTTPException(422, "Choose an offering, profession, and specialty combination from the Nexus list.")
-    candidate_ids = list(dict.fromkeys(body.candidate_ids))
-    if any(candidate_id <= 0 for candidate_id in candidate_ids):
-        raise HTTPException(422, "Candidate IDs must be positive.")
-    if len(store.get_candidates(candidate_ids)) != len(candidate_ids):
-        raise HTTPException(404, "One or more candidates were not found.")
-    user_id = str(actor.get("sub") or "local")
-    if any(
-        (store.get_candidate_ats_route(candidate_id, user_id) or {}).get("destination") == "ceipal"
-        for candidate_id in candidate_ids
-    ):
-        raise HTTPException(409, "Ceipal candidates cannot be classified for Nexus.")
-    selected = {"offering": row.offering, "profession": row.profession,
-                "specialty": row.specialty}
-    if body.recruiter_id is not None:
-        try:
-            recruiters = nexus_delivery.supported_recruiters(user_id)
-        except nexus_sync.NexusDeliveryError as exc:
-            raise HTTPException(503, "Nexus recruiters are temporarily unavailable.") from exc
-        if body.recruiter_id not in {item["id"] for item in recruiters}:
-            raise HTTPException(422, "Choose an active recruiter from the Nexus list.")
-        selected["recruiter_id"] = body.recruiter_id
-    requeued = 0
-    nexus_available = None
-    for candidate_id in candidate_ids:
-        route = store.get_candidate_ats_route(candidate_id, user_id)
-        eligibility = dict((route or {}).get("eligibility") or {})
-        eligibility.pop("nexus_classification_pending", None)
-        eligibility["nexus_classification"] = selected
-        store.set_candidate_ats_route(candidate_id, user_id, "nexus", eligibility)
-        store.release_held_nexus_delivery(candidate_id, user_id)
-        if not store.list_resumes(candidate_id):
-            continue
-        if nexus_available is None:
-            nexus_available = nexus_delivery.enabled_for(user_id)
-        queued = nexus_delivery.queue_latest_resume_if_ready(
-            candidate_id, user_id, enabled=nexus_available,
-        )
-        if queued and store.requeue_nexus_classification(candidate_id, int(queued["resume_id"]), user_id):
-            requeued += 1
-    return {"saved": len(candidate_ids), "requeued": requeued, "classification": selected}
-
-
 @app.get("/candidates")
 def candidates(request: Request, job_id: int | None = None, stage: str | None = None):
     actor = _request_user(request)
@@ -1355,12 +1235,10 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
     size = len(data)
     queue_nexus = bool(
         nexus_contact_ready and size <= config.NEXUS_MAX_RESUME_BYTES
-        and not nexus_delivery.classification_pending(cid, user_id)
     )
     nexus_skip_status = (
         "skipped_resume_too_large"
-        if nexus_contact_ready and size > config.NEXUS_MAX_RESUME_BYTES
-        else "waiting_for_classification" if nexus_contact_ready and not queue_nexus
+        if nexus_contact_ready and not queue_nexus
         else "disabled"
     )
     checksum = hashlib.sha256(data).hexdigest()
@@ -1837,9 +1715,6 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict
     delivered it — a miss is a miss, not a policy hold.
     """
     results = {}
-    user_id = str(actor.get("sub") or "local")
-    if body.hold_nexus_classification and ats_routing.destination_for(actor) == "nexus":
-        _set_nexus_classification_hold(body.candidate_ids, user_id)
     for candidate_id in dict.fromkeys(body.candidate_ids):
         candidate = store.get_candidate(candidate_id)
         if not candidate:
@@ -1867,8 +1742,6 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict
                 "location_match": None,
             }
         lookup = results[str(candidate_id)]
-        if lookup.get("status") != "found" and body.hold_nexus_classification:
-            _clear_nexus_classification_hold(candidate_id, user_id)
         if (
             lookup.get("status") == "found"
             and lookup.get("ats_destination", "nexus") == "nexus"

@@ -21,44 +21,6 @@ def _resume_pdf(name="Jane Doe"):
     return output.getvalue()
 
 
-def _select_classification(candidate_id, user_id="local"):
-    store.set_candidate_ats_route(candidate_id, user_id, "nexus", {
-        "nexus_classification": {
-            "offering": "Nursing", "profession": "RN", "specialty": "ICU",
-        },
-    })
-
-
-def test_supported_taxonomy_uses_only_active_tenant_master_rows(monkeypatch):
-    class MasterClient:
-        def __init__(self, settings):
-            pass
-
-        def get_master(self, name):
-            return {
-                "professions": [
-                    {"professionId": 77, "name": "Physician", "active": True},
-                    {"professionId": 10, "name": "RN", "active": False},
-                ],
-                "specialties": [
-                    {"specialtyId": 88, "professionId": 77,
-                     "name": "Hematology/Oncology", "active": True},
-                    {"specialtyId": 20, "professionId": 10, "name": "ICU", "active": True},
-                ],
-            }[name]
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(nexus_delivery, "_delivery_settings", lambda user: nexus_sync.NexusSettings(enabled=True))
-    monkeypatch.setattr(nexus_sync, "NexusClient", MasterClient)
-    rows = nexus_delivery.supported_taxonomy_rows("test-user")
-    assert rows == [{
-        "offering": "Physician", "profession": "Physician",
-        "specialty": "Hematology/Oncology",
-    }]
-
-
 def test_role_prefers_clinical_resume_role_over_mislabeled_employer():
     candidate = {
         "name": "Candace Robertson",
@@ -308,28 +270,10 @@ def test_resume_is_not_queued_without_explicit_contact_gate(monkeypatch):
     assert store.get_nexus_delivery_for_resume(resume["id"]) is None
 
 
-def test_nexus_worker_waits_for_manual_classification_before_remote_write(monkeypatch):
-    store.reset()
-    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
-    candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
-    resume = store.attach_resume(
-        candidate_id, "jane.pdf", _resume_pdf(), queue_nexus=True,
-    )
-    def unexpected_delivery(*args, **kwargs):
-        raise AssertionError("Nexus must not be called before recruiter input")
-
-    monkeypatch.setattr(nexus_delivery.nexus_sync, "process_delivery", unexpected_delivery)
-
-    assert nexus_delivery.classification_pending(candidate_id, "local") is True
-    assert nexus_delivery.process_once()["status"] == "waiting_for_classification"
-    assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "retry"
-
-
 def test_existing_latest_resume_is_queued_when_trusted_contacts_arrive(monkeypatch):
     store.reset()
     monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
     candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
-    _select_classification(candidate_id)
     older = store.attach_resume(
         candidate_id, "older.pdf", b"%PDF-older", checksum_sha256="a" * 64,
     )
@@ -362,7 +306,6 @@ def test_approved_quick_sourcer_record_queues_existing_resume(monkeypatch):
     candidate_id = store.add_candidate(
         "Jane Doe", "Atlanta, GA", source="indeed", source_id="qs-sync",
     )
-    _select_classification(candidate_id)
     latest = store.attach_resume(
         candidate_id, "latest.pdf", b"%PDF-latest", checksum_sha256="d" * 64,
     )
@@ -391,7 +334,6 @@ def test_worker_delivers_projected_contact_and_persists_link(monkeypatch):
     candidate_id = store.add_candidate(
         "Jane Doe", "Atlanta, GA", source="indeed", notes="Role: Registered Nurse",
     )
-    _select_classification(candidate_id)
     resume = store.attach_resume(
         candidate_id, "jane.pdf", _resume_pdf(), queue_nexus=True,
         checksum_sha256="b" * 64,
@@ -444,7 +386,6 @@ def test_worker_keeps_remote_id_when_single_contact_resume_upload_fails(monkeypa
     store.reset()
     monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
     candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
-    _select_classification(candidate_id)
     resume = store.attach_resume(
         candidate_id, "jane.pdf", _resume_pdf(), queue_nexus=True,
     )
@@ -480,7 +421,6 @@ def test_worker_holds_duplicate_conflict_for_review(monkeypatch):
     store.reset()
     monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
     candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
-    _select_classification(candidate_id)
     resume = store.attach_resume(
         candidate_id, "jane.pdf", _resume_pdf(), queue_nexus=True,
     )
@@ -517,7 +457,6 @@ def test_worker_holds_remote_success_when_identity_link_conflicts(monkeypatch):
     monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
     first_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
     second_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="linkedin")
-    _select_classification(second_id)
     store.save_nexus_candidate_link(f"candidate:{first_id}", first_id, "7001")
     resume = store.attach_resume(
         second_id, "jane.pdf", _resume_pdf(), queue_nexus=True,

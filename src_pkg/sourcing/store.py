@@ -2388,35 +2388,6 @@ def get_nexus_delivery_for_resume(resume_id):
         return dict(row) if row else None
 
 
-def requeue_nexus_classification(candidate_id: int, resume_id: int, user_id: str) -> bool:
-    """Reopen a completed linked delivery after an explicit recruiter correction."""
-    now = time.time()
-    with _conn() as connection:
-        with connection.transaction():
-            result = connection.execute(
-                """UPDATE nexus_deliveries SET status='pending', attempts=0,
-                   next_attempt_at=0, lease_until=0, requested_by=?, operation='classification_refresh',
-                   last_error='', updated=?
-                   WHERE candidate_id=? AND resume_id=? AND status='succeeded'
-                     AND EXISTS (SELECT 1 FROM nexus_candidate_links l
-                                 WHERE l.identity_key=nexus_deliveries.identity_key
-                                   AND l.nexus_candidate_id<>'')""",
-                (str(user_id or '')[:200], now, int(candidate_id), int(resume_id)),
-            )
-            return result.rowcount == 1
-
-
-def release_held_nexus_delivery(candidate_id: int, user_id: str) -> None:
-    """Wake a delivery deferred while a recruiter chose Nexus classification."""
-    with _conn() as connection:
-        connection.execute(
-            """UPDATE nexus_deliveries SET next_attempt_at=0, updated=?
-               WHERE candidate_id=? AND requested_by=? AND status='retry'
-                 AND last_error='waiting_for_classification'""",
-            (time.time(), int(candidate_id), str(user_id or '')[:200]),
-        )
-
-
 def claim_nexus_delivery(lease_seconds=90):
     """Lease one ready delivery so several installed backends cannot duplicate it."""
     now = time.time()
@@ -2638,15 +2609,14 @@ def list_nexus_deliveries(candidate_id=None):
         return [dict(row) for row in rows]
 
 
-def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_classification_ids=()):
+def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=()):
     """Return the latest durable Nexus outcome for each requested candidate."""
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     waiting_resume_ids = {int(value) for value in waiting_resume_ids or []}
-    waiting_classification_ids = {int(value) for value in waiting_classification_ids or []}
     if not ordered_ids:
         return {
             "selected": 0, "uploaded": 0, "pending": 0,
-            "already_in_nexus": 0, "waiting_for_resume": 0, "waiting_for_classification": 0,
+            "already_in_nexus": 0, "waiting_for_resume": 0,
             "not_uploaded": 0, "items": [],
         }
     placeholders = ",".join("?" for _ in ordered_ids)
@@ -2695,8 +2665,6 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
             group, reason = "already_in_nexus", "active_in_nexus"
         elif status == "succeeded":
             group, reason = "uploaded", ""
-        elif candidate_id in waiting_classification_ids:
-            group, reason = "waiting_for_classification", "recruiter_classification_pending"
         elif status in pending_states:
             group, reason = "pending", ""
         elif not delivery and candidate_id in waiting_resume_ids:
@@ -2725,7 +2693,6 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
         "pending": sum(item["group"] == "pending" for item in items),
         "already_in_nexus": sum(item["group"] == "already_in_nexus" for item in items),
         "waiting_for_resume": sum(item["group"] == "waiting_for_resume" for item in items),
-        "waiting_for_classification": sum(item["group"] == "waiting_for_classification" for item in items),
         "not_uploaded": sum(item["group"] == "not_uploaded" for item in items),
         "enabled": bool(getattr(config, "NEXUS_SYNC_ENABLED", False)),
         "items": items,

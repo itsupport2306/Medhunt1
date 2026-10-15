@@ -181,7 +181,6 @@ let activeSourcingContextKey = "";
 let activePageIndicatorLabel = "Candidate page";
 let indeedCandidates = [];
 let indeedSelected = new Set();
-let indeedManualSelected = new Set();
 let enrichedProfileKeys = new Set();
 let enrichedProfileOwner = "";
 let indeedSaveStatus = null;
@@ -193,18 +192,6 @@ let indeedScanState = { phase: "idle", found: 0, total: 0 };
 let indeedLookupState = new Map();
 let indeedLookupSummary = null;
 let nexusDeliverySummary = null;
-let nexusTaxonomyRows = [];
-let nexusRecruiterRows = [];
-let nexusRecruitersUnavailable = false;
-let nexusRecruitersLoading = false;
-let nexusRecruiterRequestId = 0;
-let nexusTaxonomyLoaded = false;
-let nexusTaxonomyLoading = false;
-let nexusTaxonomyPromise = null;
-let nexusSelection = { offering: "", profession: "", specialty: "" };
-let nexusRecruiterId = "";
-let nexusClassificationOpen = false;
-let nexusClassificationSelected = new Set();
 let nexusDeliveryCandidateIds = [];
 let nexusDeliveryPollTimer = null;
 let nexusDeliveryGeneration = 0;
@@ -1584,25 +1571,6 @@ function profileSpecialties(profile, list) {
   return list(values, 20, 240);
 }
 
-function mergeProfessionalProfileCapture(profile, captured) {
-  // The lookup was verified against the search-card identity. A detail page
-  // may format the name or location differently; changing either during the
-  // second import intentionally invalidates the saved contacts in the API.
-  const identity = {
-    name: profile.name,
-    location: profile.location,
-    source: profile.source,
-    source_id: profile.source_id,
-    _candidateId: profile._candidateId,
-    _selectionKey: profile._selectionKey,
-    _sourceTabId: profile._sourceTabId,
-    _sourceWindowId: profile._sourceWindowId,
-    _sourceContextKey: profile._sourceContextKey,
-  };
-  Object.assign(profile, captured, identity, { _detailProfileCaptured: true });
-  return profile;
-}
-
 async function enrichProfessionalProfileAndResume(profile) {
   const previous = indeedLookupFor(profile);
   indeedLookupState.set(profile._selectionKey, {
@@ -1619,7 +1587,16 @@ async function enrichProfessionalProfileAndResume(profile) {
 
   // Keep the selection identity/source id from the search card so the rich
   // profile updates the existing candidate instead of creating a duplicate.
-  mergeProfessionalProfileCapture(profile, captured);
+  Object.assign(profile, captured, {
+    source: profile.source,
+    source_id: profile.source_id || captured.source_id,
+    _candidateId: profile._candidateId,
+    _selectionKey: profile._selectionKey,
+    _sourceTabId: profile._sourceTabId,
+    _sourceWindowId: profile._sourceWindowId,
+    _sourceContextKey: profile._sourceContextKey,
+    _detailProfileCaptured: true,
+  });
   const current = indeedLookupFor(profile);
   indeedLookupState.set(profile._selectionKey, {
     ...current,
@@ -1691,7 +1668,6 @@ function startProfessionalProfileResumeBatch(profiles) {
       const completed = { ...indeedResumeBatchState };
       indeedResumeBatchState = { ...indeedResumeBatchState, active: false };
       updateSourceHeaderProgressUi();
-      if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
       if (completed.saved) {
         notify(
           `${completed.saved} professional profile resume${completed.saved === 1 ? "" : "s"} saved` +
@@ -2027,161 +2003,7 @@ function rememberEnrichedProfile(profile) {
 }
 
 function selectableIndeedCandidates() {
-  return indeedCandidates;
-}
-
-function defaultIndeedCandidates() {
   return indeedCandidates.filter((profile) => !isPreviouslyEnriched(profile));
-}
-
-async function loadNexusTaxonomy() {
-  if (nexusTaxonomyLoaded || !backendHealth) return;
-  if (nexusTaxonomyPromise) return nexusTaxonomyPromise;
-  nexusTaxonomyLoading = true;
-  nexusTaxonomyPromise = (async () => {
-    try {
-      const response = await api("/nexus/taxonomy", { timeout: 20000 });
-      nexusTaxonomyRows = Array.isArray(response?.rows) ? response.rows : [];
-      nexusTaxonomyLoaded = true;
-      if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
-    } catch {
-      // Ceipal organizations and older backends do not expose Nexus choices.
-      nexusTaxonomyLoaded = true;
-    } finally {
-      nexusTaxonomyLoading = false;
-      nexusTaxonomyPromise = null;
-    }
-  })();
-  return nexusTaxonomyPromise;
-}
-
-function nexusClassificationChoice() {
-  const values = Object.values(nexusSelection);
-  if (!values.some(Boolean)) return null;
-  if (!values.every(Boolean) || !nexusTaxonomyRows.some((row) =>
-    row.offering === nexusSelection.offering && row.profession === nexusSelection.profession
-    && row.specialty === nexusSelection.specialty
-  )) throw new Error("Choose a supported Nexus offering, profession, and specialty.");
-  return { ...nexusSelection };
-}
-
-function nexusClassificationControls() {
-  if (!nexusTaxonomyRows.length) return "";
-  const unique = (values) => [...new Set(values)].sort((a, b) => a.localeCompare(b));
-  const options = (values, selected) => `<option value="">Select</option>${unique(values).map((value) =>
-    `<option value="${escapeHtml(value)}"${value === selected ? " selected" : ""}>${escapeHtml(value)}</option>`
-  ).join("")}`;
-  const offerings = unique(nexusTaxonomyRows.map((row) => row.offering));
-  const professions = nexusTaxonomyRows.filter((row) => row.offering === nexusSelection.offering);
-  const specialties = professions.filter((row) => row.profession === nexusSelection.profession);
-  const recruiterOptions = nexusRecruiterRows.map((row) =>
-    `<option value="${Number(row.id)}"${String(row.id) === nexusRecruiterId ? " selected" : ""}>${escapeHtml(row.name)}</option>`
-  ).join("");
-  return `<div class="nexus-classification">
-    <label>Offering<select id="nexusOffering">${options(offerings, nexusSelection.offering)}</select></label>
-    <label>Profession<select id="nexusProfession"${nexusSelection.offering ? "" : " disabled"}>${options(professions.map((row) => row.profession), nexusSelection.profession)}</select></label>
-    <label>Specialty<select id="nexusSpecialty"${nexusSelection.profession ? "" : " disabled"}>${options(specialties.map((row) => row.specialty), nexusSelection.specialty)}</select></label>
-    <label>Recruiter (optional)<select id="nexusRecruiter"${nexusRecruitersLoading ? " disabled" : ""}><option value="">No recruiter selected</option>${recruiterOptions}</select></label>
-    ${nexusRecruitersLoading ? '<small class="muted">Loading Nexus recruiters…</small>' : ""}
-    ${nexusRecruitersUnavailable ? '<small class="muted">Nexus recruiters are unavailable. You can continue without one.</small>' : ""}
-  </div>`;
-}
-
-function nexusReadyProfiles() {
-  return indeedLookupProfiles.filter((profile) =>
-    Number(profile._candidateId) > 0 && isIndeedMatch(indeedLookupFor(profile))
-    && indeedLookupFor(profile).ats_destination !== "ceipal");
-}
-
-function nexusClassificationAvailable() {
-  const ready = nexusReadyProfiles();
-  return !indeedResumeBatchState.active && ready.length > 0 && ready.every((profile) =>
-    Number(indeedLookupFor(profile).resume?.id) > 0);
-}
-
-function nexusClassificationDialog() {
-  if (!nexusClassificationOpen) return "";
-  const ready = nexusReadyProfiles();
-  return `<div class="nexus-classification-overlay">
-    <section class="nexus-classification-dialog" role="dialog" aria-modal="true" aria-label="Nexus classification">
-      <div class="nexus-classification-header">
-        <div><strong>Nexus classification</strong><small>Choose the contact-ready profiles to update.</small></div>
-        <button type="button" class="inline-scan-action" data-action="close-nexus-classification" aria-label="Close">Close</button>
-      </div>
-      <div class="nexus-classification-profiles" role="group" aria-label="Ready profiles">
-        ${ready.map((profile) => `<label><input type="checkbox" class="nexus-ready-select" data-candidate-id="${Number(profile._candidateId)}"${nexusClassificationSelected.has(Number(profile._candidateId)) ? " checked" : ""}><span>${escapeHtml(profile.name)}</span></label>`).join("")}
-      </div>
-      ${nexusClassificationControls()}
-      <button type="button" class="lookup-button nexus-classification-apply" data-action="apply-nexus-classification"${nexusClassificationSelected.size && nexusTaxonomyRows.length ? "" : " disabled"}>Apply to <span id="nexusClassificationCount">${nexusClassificationSelected.size}</span> selected</button>
-    </section>
-  </div>`;
-}
-
-async function openNexusClassification() {
-  if (!nexusClassificationAvailable()) {
-    throw new Error("Wait until every contact-ready profile has a saved resume.");
-  }
-  if (!nexusTaxonomyRows.length) {
-    nexusTaxonomyLoaded = false;
-    await loadNexusTaxonomy();
-  }
-  if (!nexusTaxonomyRows.length) {
-    throw new Error("Nexus classification choices are unavailable. Try again shortly.");
-  }
-  nexusRecruiterId = "";
-  nexusRecruiterRows = [];
-  nexusRecruitersUnavailable = false;
-  nexusRecruitersLoading = true;
-  const requestId = ++nexusRecruiterRequestId;
-  nexusClassificationSelected = new Set(nexusReadyProfiles().map((profile) => Number(profile._candidateId)));
-  nexusClassificationOpen = true;
-  renderIndeedProfiles();
-  api("/nexus/recruiters", { timeout: 20000 }).then((response) => {
-    if (requestId !== nexusRecruiterRequestId) return;
-    nexusRecruiterRows = Array.isArray(response?.rows) ? response.rows : [];
-    nexusRecruitersUnavailable = false;
-  }).catch(() => {
-    if (requestId !== nexusRecruiterRequestId) return;
-    nexusRecruiterRows = [];
-    nexusRecruitersUnavailable = true;
-  }).finally(() => {
-    if (requestId !== nexusRecruiterRequestId) return;
-    nexusRecruitersLoading = false;
-    if (nexusClassificationOpen) renderIndeedProfiles();
-  });
-}
-
-function closeNexusClassification() {
-  nexusRecruiterRequestId += 1;
-  nexusClassificationOpen = false;
-  renderIndeedProfiles();
-}
-
-async function applyNexusClassification() {
-  if (!nexusClassificationAvailable()) {
-    throw new Error("Wait until every contact-ready profile has a saved resume.");
-  }
-  const readyIds = new Set(nexusReadyProfiles().map((profile) => Number(profile._candidateId)));
-  const candidateIds = [...nexusClassificationSelected].filter((id) => readyIds.has(id));
-  if (!candidateIds.length) throw new Error("Select at least one contact-ready profile.");
-  const classification = nexusClassificationChoice();
-  if (!classification) throw new Error("Choose a Nexus offering, profession, and specialty.");
-  if (nexusRecruiterId) {
-    if (!nexusRecruiterRows.some((row) => String(row.id) === nexusRecruiterId)) {
-      throw new Error("Choose a recruiter from the Nexus list.");
-    }
-    classification.recruiter_id = Number(nexusRecruiterId);
-  }
-  await api("/candidates/nexus-classification/batch", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ candidate_ids: candidateIds, ...classification }),
-    timeout: 30000,
-  });
-  nexusClassificationOpen = false;
-  renderIndeedProfiles();
-  trackNexusDeliveries(nexusDeliveryCandidateIds.length ? nexusDeliveryCandidateIds : candidateIds);
-  notify(`Nexus classification saved for ${candidateIds.length} profile${candidateIds.length === 1 ? "" : "s"}.`, "success");
 }
 
 function updateIndeedSelectionUi() {
@@ -2210,8 +2032,10 @@ function updateIndeedSelectionUi() {
         : "Select all profiles");
   }
   document.querySelectorAll(".indeed-select").forEach((checkbox) => {
-    checkbox.checked = indeedSelected.has(checkbox.dataset.key);
-    checkbox.disabled = indeedScanState.phase === "lookup";
+    checkbox.disabled = indeedScanState.phase === "lookup" ||
+      isPreviouslyEnriched(indeedCandidates.find((profile) => profile._selectionKey === checkbox.dataset.key)) || (
+      count >= MAX_LOOKUP_SELECTION && !checkbox.checked
+    );
   });
   const selectAll = $("#indeedSelectAll");
   if (selectAll) {
@@ -2543,7 +2367,6 @@ function renderIndeedScanning() {
 function renderIndeedProfiles(scan = {}) {
   const profiles = indeedFilteredProfiles();
   const hasResults = indeedScanState.phase === "results" && Boolean(indeedLookupSummary);
-  if (hasResults && !nexusTaxonomyLoaded && !nexusTaxonomyLoading) void loadNexusTaxonomy();
   const isLookingUp = indeedScanState.phase === "lookup";
   const matched = Number(indeedLookupSummary?.matched) || 0;
   const noMatch = Number(indeedLookupSummary?.no_match) || 0;
@@ -2571,8 +2394,7 @@ function renderIndeedProfiles(scan = {}) {
             <span class="summary-signal" aria-hidden="true"></span><span>Unavailable</span><strong>${failed}</strong>
           </button>` : ""}
         </div>
-        ${nexusDeliverySummaryMarkup()}
-        ${nexusClassificationAvailable() ? `<div class="nexus-result-action"><button type="button" class="inline-scan-action" data-action="open-nexus-classification">Set Nexus classification for ready profiles</button></div>` : ""}` : `
+        ${nexusDeliverySummaryMarkup()}` : `
         <div class="capture-toolbar">
           <div class="queue-heading">
             <span class="section-kicker">Profiles on this page</span>
@@ -2600,7 +2422,7 @@ function renderIndeedProfiles(scan = {}) {
           const primary = hasResults
             ? `${avatar}${identity}`
             : `<div class="capture-row-primary">
-                <label class="candidate-select-control"><input type="checkbox" class="indeed-select" data-key="${escapeHtml(key)}"${indeedSelected.has(key) ? " checked" : ""}${isLookingUp ? " disabled" : ""}><span class="sr-only">Select ${escapeHtml(profile.name)}</span></label>
+                <label class="candidate-select-control"><input type="checkbox" class="indeed-select" data-key="${escapeHtml(key)}"${indeedSelected.has(key) ? " checked" : ""}${isLookingUp || previouslyEnriched ? " disabled" : ""}><span class="sr-only">Select ${escapeHtml(profile.name)}</span></label>
                 ${avatar}
                 ${identity}
               </div>`;
@@ -2635,7 +2457,6 @@ function renderIndeedProfiles(scan = {}) {
             <span class="lookup-arrow" aria-hidden="true">&#8594;</span>
           </button>
         </div>`}
-      ${hasResults ? nexusClassificationDialog() : ""}
     </section>`;
   updateIndeedSelectionUi();
 }
@@ -2664,7 +2485,6 @@ function nexusCandidateStatusMarkup(candidateId) {
     pending: ["pending", "Nexus upload pending"],
     already_in_nexus: ["existing", "Already in Nexus"],
     waiting_for_resume: ["waiting", "Waiting for resume before Nexus upload"],
-    waiting_for_classification: ["waiting", "Waiting for your Nexus classification"],
     not_uploaded: ["failed", "Not parsed to Nexus"],
   };
   const [state, label] = states[item.group] || ["failed", "Not parsed to Nexus"];
@@ -2684,7 +2504,6 @@ function nexusDeliverySummaryMarkup() {
   const pending = Number(nexusDeliverySummary.pending) || 0;
   const alreadyInNexus = Number(nexusDeliverySummary.already_in_nexus) || 0;
   const waitingForResume = Number(nexusDeliverySummary.waiting_for_resume) || 0;
-  const waitingForClassification = Number(nexusDeliverySummary.waiting_for_classification) || 0;
   const notUploaded = Number(nexusDeliverySummary.not_uploaded) || 0;
   return `<div class="nexus-delivery-summary${pending ? " is-pending" : ""}" role="status" aria-live="polite">
     <strong>Nexus upload</strong>
@@ -2692,7 +2511,6 @@ function nexusDeliverySummaryMarkup() {
     <span><b>${pending}</b> pending</span>
     <span><b>${alreadyInNexus}</b> already in Nexus</span>
     <span><b>${waitingForResume}</b> waiting for resume</span>
-    ${waitingForClassification ? `<span><b>${waitingForClassification}</b> awaiting your classification</span>` : ""}
     <span><b>${notUploaded}</b> not uploaded</span>
   </div>`;
 }
@@ -2766,9 +2584,6 @@ async function ensureProfessionalProfileResume(profile) {
     try {
       const existingResume = await existingContactResume(candidateId);
       if (existingResume) {
-        if (IS_EXTENSION) {
-          await saveStoredResumeDownload(profile, candidateId, existingResume, { refresh: true }).catch(() => {});
-        }
         const latest = indeedLookupFor(profile);
         indeedLookupState.set(profile._selectionKey, {
           ...latest,
@@ -2787,9 +2602,6 @@ async function ensureProfessionalProfileResume(profile) {
       });
       if (!attached?.attached || !Number(attached?.resume?.id)) {
         throw new Error("The generated professional profile response was incomplete.");
-      }
-      if (attached.resume.contact_sheet_embedded !== true) {
-        throw new Error("Verified contacts were not attached to the professional profile PDF.");
       }
       const latest = indeedLookupFor(profile);
       indeedLookupState.set(profile._selectionKey, {
@@ -3135,19 +2947,16 @@ async function scanIndeedCandidates(options = {}) {
         ? new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
         : new Set(
         indeedCandidates
+          .filter((profile) => !isPreviouslyEnriched(profile))
           .map((profile) => profile._selectionKey)
           .filter((key) => previousSelection.has(key)),
         ))
-      : new Set(defaultIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey));
-    indeedManualSelected = keepSelection
-      ? new Set([...indeedManualSelected].filter((key) => indeedSelected.has(key)))
-      : new Set();
+      : new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey));
     indeedScanState = {
       phase: "captured",
       found: indeedCandidates.length,
       total: Number(result.expected_count) || indeedCandidates.length,
     };
-    void loadNexusTaxonomy();
     indeedSaveStatus = null;
     if (!indeedCandidates.length) {
       renderSourcingStatus(
@@ -3734,7 +3543,6 @@ async function lookupSelectedIndeedCandidates() {
           candidate_ids: candidateIds.slice(start, start + CONTACT_BATCH_SIZE),
           run_id: lookupRunId,
           confirmed: true,
-          hold_nexus_classification: true,
         }),
         timeout: 30000,
       });
@@ -3813,7 +3621,6 @@ async function lookupSelectedIndeedCandidates() {
             candidate_ids: chunk.map((profile) => profile._candidateId),
             run_id: lookupRunId,
             confirmed: true,
-            hold_nexus_classification: true,
           }),
           timeout: CONTACT_BATCH_TIMEOUT,
         });
@@ -3860,7 +3667,6 @@ function toggleAllIndeedCandidates() {
   indeedSelected = indeedSelected.size === selectable.length
     ? new Set()
     : new Set(selectable.map((profile) => profile._selectionKey));
-  indeedManualSelected.clear();
   document.querySelectorAll(".indeed-select").forEach((checkbox) => {
     checkbox.checked = indeedSelected.has(checkbox.dataset.key);
   });
@@ -3979,10 +3785,10 @@ async function processPendingResumeEvents() {
   for (const event of pending?.events || []) await handleDownloadedResume(event);
 }
 
-async function saveStoredResumeDownload(profile, candidateId, resume, { refresh = false } = {}) {
+async function saveStoredResumeDownload(profile, candidateId, resume) {
   const key = `${Number(candidateId)}|${Number(resume?.id)}`;
   if (!Number(candidateId) || !Number(resume?.id)) throw new Error("The stored resume could not be identified.");
-  if (!refresh && completedStoredResumeDownloads.has(key)) return null;
+  if (completedStoredResumeDownloads.has(key)) return null;
   if (storedResumeDownloadPromises.has(key)) return storedResumeDownloadPromises.get(key);
   const pending = (async () => {
   const safeName = String(profile.name || "candidate")
@@ -4152,7 +3958,6 @@ function startLinkedinResumeBatch(profiles) {
       const completed = { ...indeedResumeBatchState };
       indeedResumeBatchState = { ...indeedResumeBatchState, active: false };
       updateSourceHeaderProgressUi();
-      if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
 
       let sourceTab = null;
       try { sourceTab = await chrome.tabs.get(Number(completed.sourceTabId)); } catch { sourceTab = null; }
@@ -4261,7 +4066,6 @@ function startIndeedResumeBatch(profiles) {
         until: Date.now() + 2500,
       };
       updateSourceHeaderProgressUi();
-      if (activeView === "indeed" && indeedScanState.phase === "results") renderIndeedProfiles();
 
       if (completed.saved) {
         notify(
@@ -4859,47 +4663,12 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("change", async (event) => {
-  if (event.target.classList.contains("nexus-ready-select")) {
-    const id = Number(event.target.dataset.candidateId);
-    if (event.target.checked) nexusClassificationSelected.add(id);
-    else nexusClassificationSelected.delete(id);
-    const apply = document.querySelector(".nexus-classification-apply");
-    if (apply) apply.disabled = !nexusClassificationSelected.size;
-    const count = document.querySelector("#nexusClassificationCount");
-    if (count) count.textContent = String(nexusClassificationSelected.size);
-    return;
-  }
-  if (["nexusOffering", "nexusProfession", "nexusSpecialty"].includes(event.target.id)) {
-    if (event.target.id === "nexusOffering") {
-      nexusSelection = { offering: event.target.value, profession: "", specialty: "" };
-    } else if (event.target.id === "nexusProfession") {
-      nexusSelection = { ...nexusSelection, profession: event.target.value, specialty: "" };
-    } else {
-      nexusSelection = { ...nexusSelection, specialty: event.target.value };
-    }
-    renderIndeedProfiles();
-    return;
-  }
   if (event.target.classList.contains("indeed-select")) {
     if (event.target.checked && indeedSelected.size >= MAX_LOOKUP_SELECTION) {
-      const autoSelected = [...indeedSelected].filter((key) => !indeedManualSelected.has(key));
-      const replaced = autoSelected.at(-1);
-      if (replaced) {
-        indeedSelected.delete(replaced);
-        indeedSelected.add(event.target.dataset.key);
-        indeedManualSelected.add(event.target.dataset.key);
-        notify(`Replaced an automatic selection to stay within the ${MAX_LOOKUP_SELECTION}-profile limit.`);
-      } else {
-        event.target.checked = false;
-        notify(`Unselect one profile first. You can select up to ${MAX_LOOKUP_SELECTION}.`, "error");
-      }
-    } else if (event.target.checked) {
-      indeedSelected.add(event.target.dataset.key);
-      indeedManualSelected.add(event.target.dataset.key);
-    } else {
-      indeedSelected.delete(event.target.dataset.key);
-      indeedManualSelected.delete(event.target.dataset.key);
-    }
+      event.target.checked = false;
+      notify(`You can select up to ${MAX_LOOKUP_SELECTION} candidates.`, "error");
+    } else if (event.target.checked) indeedSelected.add(event.target.dataset.key);
+    else indeedSelected.delete(event.target.dataset.key);
     updateIndeedSelectionUi();
     return;
   }
@@ -4907,15 +4676,10 @@ document.addEventListener("change", async (event) => {
     indeedSelected = event.target.checked
       ? new Set(selectableIndeedCandidates().slice(0, MAX_LOOKUP_SELECTION).map((profile) => profile._selectionKey))
       : new Set();
-    indeedManualSelected.clear();
     document.querySelectorAll(".indeed-select").forEach((checkbox) => {
       checkbox.checked = indeedSelected.has(checkbox.dataset.key);
     });
     updateIndeedSelectionUi();
-    return;
-  }
-  if (event.target.id === "nexusRecruiter") {
-    nexusRecruiterId = event.target.value;
     return;
   }
   if (!["jobSelect", "addJobSelect", "indeedJobSelect"].includes(event.target.id)) return;
@@ -4924,10 +4688,6 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
-  if (event.target.classList?.contains("nexus-classification-overlay")) {
-    closeNexusClassification();
-    return;
-  }
   const nav = event.target.closest(".nav-link");
   if (nav) {
     await go(nav.dataset.view);
@@ -4995,9 +4755,6 @@ document.addEventListener("click", async (event) => {
     },
     "toggle-all-indeed": toggleAllIndeedCandidates,
     "lookup-indeed": lookupSelectedIndeedCandidates,
-    "open-nexus-classification": openNexusClassification,
-    "close-nexus-classification": closeNexusClassification,
-    "apply-nexus-classification": applyNexusClassification,
     "retry-failed-lookups": retryFailedLookups,
     "filter-indeed-results": () => filterIndeedResults(button.dataset.filter),
     "approve-identity": () => approveCandidateIdentity(
