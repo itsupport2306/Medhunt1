@@ -4619,3 +4619,315 @@ def test_zoom_sms_rejects_messages_over_29_words_before_calling_zoom(monkeypatch
             assert sent_messages == []
 
     asyncio.run(exercise())
+
+
+def test_nexus_classification_selection_validates_and_requeues_linked_candidate(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    candidate_id = store.add_candidate("Raja Flores", "Columbus, OH", source="sharecare")
+    resume = store.attach_resume(candidate_id, "raja.pdf", b"%PDF-test", queue_nexus=True)
+    delivery = store.get_nexus_delivery_for_resume(resume["id"])
+    store.save_nexus_candidate_link(delivery["identity_key"], candidate_id, "9001")
+    store.finish_nexus_delivery(delivery["id"], "succeeded", nexus_candidate_id="9001")
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_taxonomy_rows", lambda user: [
+        {"offering": "Physician", "profession": "Physician",
+         "specialty": "Hematology/Oncology"},
+    ])
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_recruiters", lambda user: [
+        {"id": 57, "name": "Tina Mihic"},
+    ])
+    monkeypatch.setattr(api_module.nexus_delivery, "queue_latest_resume_if_ready", lambda cid, user, **kwargs: {
+        "resume_id": resume["id"],
+    })
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            options = await client.get("/nexus/taxonomy")
+            assert options.status_code == 200
+            assert options.json()["rows"][0]["offering"] == "Physician"
+            recruiters = await client.get("/nexus/recruiters")
+            assert recruiters.status_code == 200
+            assert recruiters.json()["rows"] == [{"id": 57, "name": "Tina Mihic"}]
+            invalid = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Nursing",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert invalid.status_code == 422
+            invalid_recruiter = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+                "recruiter_id": 999,
+            })
+            assert invalid_recruiter.status_code == 422
+            valid = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+                "recruiter_id": 57,
+            })
+            assert valid.status_code == 200, valid.text
+            assert valid.json()["requeued"] == 1
+
+    asyncio.run(exercise())
+    route = store.get_candidate_ats_route(candidate_id, "local")
+    assert route["eligibility"]["nexus_classification"] == {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology", "recruiter_id": 57,
+    }
+    assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "pending"
+    assert store.get_nexus_delivery_for_resume(resume["id"])["operation"] == "classification_refresh"
+    payload = api_module.nexus_delivery._payload(
+        store.get_nexus_delivery_for_resume(resume["id"]),
+        store.get_candidate(candidate_id), store.get_resume(candidate_id, resume["id"]),
+    )
+    assert payload["candidate"]["nexus_classification"] == route["eligibility"]["nexus_classification"]
+
+
+def test_nexus_first_upload_waits_for_recruiter_classification_without_hold_flag(monkeypatch):
+    from pypdf import PdfWriter
+
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    monkeypatch.setattr(api_module.nexus_delivery, "enabled_for", lambda user: True)
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_taxonomy_rows", lambda user: [
+        {"offering": "Physician", "profession": "Physician",
+         "specialty": "Hematology/Oncology"},
+    ])
+    candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(contact_access, "project_candidate", lambda row, **kwargs: {
+        **candidate, "contacts_trusted": True, "emails": ["avery@example.com"], "phones": [],
+    })
+    pdf = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(pdf)
+    resume = api_module._store_resume_pdf(candidate_id, "avery.pdf", pdf.getvalue())
+    assert resume["nexus_sync_status"] == "waiting_for_classification"
+    assert store.get_nexus_delivery_for_resume(resume["id"]) is None
+    assert api_module.nexus_delivery.queue_latest_resume_if_ready(candidate_id) is None
+
+    async def apply_choice():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            waiting = await client.post("/nexus/delivery-summary", json={
+                "candidate_ids": [candidate_id],
+            })
+            assert waiting.status_code == 200
+            assert waiting.json()["waiting_for_classification"] == 1
+            response = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert response.status_code == 200, response.text
+            queued = await client.post("/nexus/delivery-summary", json={
+                "candidate_ids": [candidate_id],
+            })
+            assert queued.json()["waiting_for_classification"] == 0
+            assert queued.json()["pending"] == 1
+
+    asyncio.run(apply_choice())
+    delivery = store.get_nexus_delivery_for_resume(resume["id"])
+    assert delivery["status"] == "pending"
+    assert not api_module.nexus_delivery.classification_pending(candidate_id, "local")
+    payload = api_module.nexus_delivery._payload(
+        delivery, store.get_candidate(candidate_id), store.get_resume(candidate_id, resume["id"]),
+    )
+    assert payload["candidate"]["nexus_classification"] == {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology",
+    }
+
+
+def test_extension_lookup_queue_holds_nexus_before_worker_starts(monkeypatch):
+    store.reset()
+    candidate_id = store.add_candidate("Avery Smith", "Iowa Falls, IA", source="indeed")
+    monkeypatch.setattr(store, "enqueue_contact_lookup_jobs", lambda *args, **kwargs: [])
+    monkeypatch.setattr(healthboard_auth, "medhunt_contact_lookup_limit", lambda user: 80)
+
+    async def enqueue():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/contact-lookup/queue", json={
+                "candidate_ids": [candidate_id], "run_id": "test-run-1234",
+                "confirmed": True, "hold_nexus_classification": True,
+            })
+            assert response.status_code == 200, response.text
+
+    asyncio.run(enqueue())
+    assert api_module.nexus_delivery.classification_pending(candidate_id, "local")
+
+
+def test_extension_can_select_enriched_profile_and_filter_nexus_choices():
+    from playwright.sync_api import sync_playwright
+    from sidepanel_lifecycle_smoke import MOCK_SCRIPT
+
+    chrome = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+    if not chrome.exists():
+        pytest.skip("Chrome is required for the extension selection check")
+    frontend = Path(__file__).parents[1] / "frontend"
+    index = (frontend / "index.html").read_text(encoding="utf-8")
+    index = re.sub(r"\s*<script\s+src=[^>]+></script>", "", index, flags=re.I)
+    app_script = (frontend / "app.js").read_text(encoding="utf-8")
+    app_script = app_script.replace(
+        'const IS_EXTENSION = ["chrome-extension:", "moz-extension:"].includes(location.protocol);',
+        "const IS_EXTENSION = true;", 1,
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, executable_path=str(chrome))
+        try:
+            page = browser.new_page()
+            page.set_content(index)
+            page.evaluate(MOCK_SCRIPT)
+            page.evaluate("""() => {
+              const original = window.fetch;
+              window.fetch = (input, options) => {
+                const path = new URL(input, location.href).pathname;
+                if (path === '/candidates/nexus-classification/batch') {
+                  window.nexusClassificationRequest = JSON.parse(options.body);
+                  return Promise.resolve(new Response(JSON.stringify({saved: 1, requeued: 0}),
+                    {status: 200, headers: {'content-type': 'application/json'}}));
+                }
+                if (path === '/nexus/taxonomy') {
+                  return Promise.resolve(new Response(JSON.stringify({rows: [
+                    {offering:'Physician', profession:'Physician', specialty:'Hematology/Oncology'},
+                    {offering:'Nursing', profession:'RN', specialty:'ICU'},
+                  ]}), {status:200, headers:{'content-type':'application/json'}}));
+                }
+                if (path === '/nexus/recruiters') {
+                  return Promise.resolve(new Response(JSON.stringify({rows: [
+                    {id:57, name:'Tina Mihic'},
+                  ]}), {status:200, headers:{'content-type':'application/json'}}));
+                }
+                return original(input, options);
+              };
+            }""")
+            page.add_script_tag(path=str(frontend / "profile-quality.js"))
+            page.add_script_tag(content=app_script)
+            page.wait_for_function("() => document.body.innerText.includes('Alice Morgan')")
+            assert page.locator("#nexusOffering").count() == 0
+            page.evaluate("""() => {
+              rememberEnrichedProfile(indeedCandidates[0]);
+              indeedSelected.clear();
+              renderIndeedProfiles();
+            }""")
+            checkbox = page.locator(".indeed-select")
+            assert checkbox.is_enabled()
+            checkbox.check()
+            assert checkbox.is_checked()
+            assert page.locator("#nexusOffering").count() == 0
+            page.evaluate("""() => {
+              window.originalTestProfile = indeedCandidates[0];
+              indeedCandidates = Array.from({length: 12}, (_, index) => ({
+                ...window.originalTestProfile,
+                name: `Candidate ${index + 1}`,
+                source_id: `test-profile-${index + 1}`,
+                source_url: `https://example.com/profile/${index + 1}`,
+                _selectionKey: `test-profile-${index + 1}`,
+              }));
+              rememberEnrichedProfile(indeedCandidates[10]);
+              rememberEnrichedProfile(indeedCandidates[11]);
+              indeedSelected = new Set(indeedCandidates.slice(0, 10).map((profile) => profile._selectionKey));
+              indeedManualSelected = new Set();
+              renderIndeedProfiles();
+            }""")
+            checkboxes = page.locator(".indeed-select")
+            assert checkboxes.count() == 12
+            assert checkboxes.nth(10).is_enabled()
+            checkboxes.nth(10).check()
+            assert checkboxes.nth(10).is_checked()
+            assert not checkboxes.nth(9).is_checked()
+            checkboxes.nth(11).check()
+            assert checkboxes.nth(10).is_checked()
+            assert checkboxes.nth(11).is_checked()
+            assert not checkboxes.nth(8).is_checked()
+            assert page.locator("#indeedSelectedCount").inner_text() == "10"
+            page.evaluate("""() => {
+              const profile = window.originalTestProfile;
+              indeedCandidates = [profile];
+              indeedManualSelected = new Set();
+              indeedSelected = new Set([profile._selectionKey]);
+              profile._candidateId = 42;
+              const second = {...profile, name: 'Second Candidate', _candidateId: 43,
+                _selectionKey: 'second-candidate'};
+              indeedLookupProfiles = [profile, second];
+              indeedLookupScope = new Set([profile._selectionKey]);
+              indeedLookupState.set(profile._selectionKey, {
+                status: 'found', emails: ['alice@example.com'], phones: [],
+              });
+              indeedLookupState.set(second._selectionKey, {
+                status: 'found', emails: ['second@example.com'], phones: [],
+              });
+              indeedLookupSummary = {total: 1, processed: 1, matched: 1, no_match: 0, errors: 0};
+              indeedScanState.phase = 'results';
+              renderIndeedProfiles();
+            }""")
+            assert page.locator('[data-action="open-nexus-classification"]').count() == 0
+            page.evaluate("""() => {
+              const first = indeedLookupProfiles[0];
+              const result = indeedLookupFor(first);
+              indeedLookupState.set(first._selectionKey, {...result,
+                resume: {id: 501}, resume_status: 'stored'});
+              renderIndeedProfiles();
+            }""")
+            assert page.locator('[data-action="open-nexus-classification"]').count() == 0
+            page.evaluate("""() => {
+              const second = indeedLookupProfiles[1];
+              const result = indeedLookupFor(second);
+              indeedLookupState.set(second._selectionKey, {...result,
+                resume: {id: 502}, resume_status: 'stored'});
+              indeedResumeBatchState.active = true;
+              renderIndeedProfiles();
+            }""")
+            assert page.locator('[data-action="open-nexus-classification"]').count() == 0
+            page.evaluate("""() => {
+              indeedResumeBatchState.active = false;
+              renderIndeedProfiles();
+            }""")
+            page.wait_for_selector('[data-action="open-nexus-classification"]')
+            assert page.locator("#nexusOffering").count() == 0
+            page.locator('[data-action="open-nexus-classification"]').click()
+            assert page.locator(".nexus-ready-select").count() == 2
+            page.locator('.nexus-ready-select[data-candidate-id="43"]').uncheck()
+            page.locator("#nexusOffering").select_option("Physician")
+            page.locator("#nexusProfession").select_option("Physician")
+            assert page.locator("#nexusSpecialty option").all_text_contents() == [
+                "Select", "Hematology/Oncology",
+            ]
+            page.locator("#nexusSpecialty").select_option("Hematology/Oncology")
+            page.locator("#nexusRecruiter").select_option("57")
+            page.locator('[data-action="apply-nexus-classification"]').click()
+            page.wait_for_function("() => Boolean(window.nexusClassificationRequest)")
+            assert page.evaluate("() => window.nexusClassificationRequest") == {
+                "candidate_ids": [42],
+                "offering": "Physician",
+                "profession": "Physician",
+                "specialty": "Hematology/Oncology",
+                "recruiter_id": 57,
+            }
+            page.locator('[data-action="open-nexus-classification"]').click()
+            assert page.locator("#nexusRecruiter").input_value() == ""
+            page.locator('[data-action="close-nexus-classification"]').click()
+            assert page.locator("#nexusOffering").count() == 0
+        finally:
+            browser.close()
+
+
+def test_nexus_classification_does_not_change_ceipal_candidate_route():
+    store.reset()
+    candidate_id = store.add_candidate("Ceipal Candidate", "Austin, TX", source="indeed")
+    store.set_candidate_ats_route(candidate_id, "local", "ceipal")
+    assert api_module._set_nexus_classification_hold([candidate_id], "local") == []
+    assert api_module._clear_nexus_classification_hold(candidate_id, "local") == {}
+
+    async def apply_choice():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert response.status_code == 409
+
+    asyncio.run(apply_choice())
+    assert store.get_candidate_ats_route(candidate_id, "local")["destination"] == "ceipal"
