@@ -312,11 +312,14 @@ def test_nexus_worker_waits_for_manual_classification_before_remote_write(monkey
     store.reset()
     monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
     candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
+    store.set_candidate_ats_route(candidate_id, "local", "nexus", {
+        "nexus_classification_pending": True,
+    })
     resume = store.attach_resume(
         candidate_id, "jane.pdf", _resume_pdf(), queue_nexus=True,
     )
     def unexpected_delivery(*args, **kwargs):
-        raise AssertionError("Nexus must not be called before recruiter input")
+        raise AssertionError("Nexus must not be called before classification input")
 
     monkeypatch.setattr(nexus_delivery.nexus_sync, "process_delivery", unexpected_delivery)
 

@@ -4670,7 +4670,30 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
     assert payload["candidate"]["nexus_classification"] == route["eligibility"]["nexus_classification"]
 
 
-def test_nexus_first_upload_waits_for_classification_without_hold_flag(monkeypatch):
+def test_legacy_extension_resume_queues_nexus_without_manual_classification(monkeypatch):
+    from pypdf import PdfWriter
+
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    monkeypatch.setattr(api_module.nexus_delivery, "enabled_for", lambda user: True)
+    candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(contact_access, "project_candidate", lambda row, **kwargs: {
+        **candidate, "contacts_trusted": True, "emails": ["avery@example.com"], "phones": [],
+    })
+    pdf = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(pdf)
+
+    resume = api_module._store_resume_pdf(candidate_id, "avery.pdf", pdf.getvalue())
+
+    assert not api_module.nexus_delivery.classification_pending(candidate_id, "local")
+    assert resume["nexus_sync_status"] == "pending"
+    assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "pending"
+
+
+def test_nexus_first_upload_waits_for_explicit_classification_hold(monkeypatch):
     from pypdf import PdfWriter
 
     store.reset()
@@ -4681,6 +4704,7 @@ def test_nexus_first_upload_waits_for_classification_without_hold_flag(monkeypat
          "specialty": "Hematology/Oncology"},
     ])
     candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
+    api_module._set_nexus_classification_hold([candidate_id], "local")
     candidate = store.get_candidate(candidate_id)
     monkeypatch.setattr(contact_access, "project_candidate", lambda row, **kwargs: {
         **candidate, "contacts_trusted": True, "emails": ["avery@example.com"], "phones": [],

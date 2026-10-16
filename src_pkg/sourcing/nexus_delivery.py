@@ -64,14 +64,20 @@ def classification_pending(candidate_id: int, user_id: str) -> bool:
     route = store.get_candidate_ats_route(candidate_id, user_id)
     eligibility = (route or {}).get("eligibility") or {}
     selected = eligibility.get("nexus_classification")
-    return bool(
-        eligibility.get("nexus_classification_pending")
-        or not isinstance(selected, dict)
-        or nexus_taxonomy.selected_row(
+    # 3.37.7 has no manual classification UI or hold flag. Continue its
+    # established automatic Nexus route; newer clients explicitly set the
+    # hold before lookup and remain blocked until the recruiter saves a choice.
+    if eligibility.get("nexus_classification_pending"):
+        return True
+    if selected is None:
+        return False
+    return not (
+        isinstance(selected, dict)
+        and nexus_taxonomy.selected_row(
             str(selected.get("offering") or ""),
             str(selected.get("profession") or ""),
             str(selected.get("specialty") or ""),
-        ) is None
+        ) is not None
     )
 
 
