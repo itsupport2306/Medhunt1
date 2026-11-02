@@ -286,6 +286,21 @@ def supported_taxonomy_rows(user_id: str) -> list[dict]:
     return output
 
 
+def recruiter_for_email(user_id: str, email: str) -> dict:
+    """Resolve the authenticated extension user to one active Nexus recruiter."""
+    settings = _delivery_settings(user_id)
+    if not settings.enabled:
+        raise nexus_sync.NexusPermanentError(
+            "Nexus delivery is not configured for your organization.",
+            operation="configuration",
+        )
+    client = nexus_sync.NexusClient(settings)
+    try:
+        return nexus_sync.recruiter_for_email(client, email)
+    finally:
+        client.close()
+
+
 def process_once() -> dict | None:
     """Process at most one leased outbox row; return a non-PII status summary."""
     if not worker_enabled():

@@ -139,6 +139,65 @@ def test_selected_classification_is_sent_with_single_contact_candidate():
     assert result["classification_updated"] is False
 
 
+def test_recruiter_is_resolved_only_by_exact_authenticated_email():
+    class MasterClient:
+        def get_master(self, name):
+            assert name == "recruiters"
+            return [
+                {"recruiterId": 57, "name": "Wrong Name", "emailAddress": "User@Example.com", "active": True},
+                {"recruiterId": 58, "name": "user@example.com", "emailAddress": "other@example.com", "active": True},
+                {"recruiterId": 59, "email": "user@example.com", "active": False},
+            ]
+
+    assert nexus_sync.recruiter_for_email(MasterClient(), " user@example.com ") == {
+        "id": 57, "name": "user@example.com", "email": "user@example.com",
+    }
+
+
+def test_email_mapped_recruiter_is_created_with_candidate_and_resume():
+    selected = {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology", "recruiter_id": 57,
+    }
+
+    def handler(request):
+        path = request.url.path
+        if path.endswith("/master/professions"):
+            return httpx.Response(200, json=[
+                {"professionId": 77, "name": "Physician", "active": True},
+            ])
+        if path.endswith("/master/specialties"):
+            return httpx.Response(200, json=[
+                {"specialtyId": 88, "professionId": 77,
+                 "name": "Hematology/Oncology", "active": True},
+            ])
+        if path.endswith("/master/recruiters"):
+            return httpx.Response(200, json=[
+                {"recruiterId": 57, "email": "user@example.com", "active": True},
+            ])
+        if path.endswith("/candidates") and request.method == "POST":
+            profile = json.loads(request.content)
+            assert profile["recruiterId"] == 57
+            assert profile["primarySpecialtyId"] == 88
+            return httpx.Response(201, json={"id": 710})
+        if path.endswith("/candidates/710/upload/documents"):
+            return httpx.Response(200, json={"uploadFailedDocumentNames": []})
+        if path.endswith("/candidates/710") and request.method == "GET":
+            return httpx.Response(200, json={
+                "professionIds": [77], "specialtyIds": [88],
+                "primarySpecialtyId": 88, "recruiterId": 57,
+            })
+        raise AssertionError(request.url)
+
+    settings = _settings()
+    result = nexus_sync.process_delivery(
+        _payload(nexus_classification=selected), PDF,
+        settings=settings, client=_client(settings, handler),
+    )
+    assert result["nexus_candidate_id"] == 710
+    assert result["classification_updated"] is False
+
+
 def test_selected_classification_repairs_already_linked_nexus_candidate():
     payload = _payload(nexus_classification={
         "offering": "Physician", "profession": "Physician",

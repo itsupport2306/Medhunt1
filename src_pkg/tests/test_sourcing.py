@@ -4633,6 +4633,9 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
         {"offering": "Physician", "profession": "Physician",
          "specialty": "Hematology/Oncology"},
     ])
+    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor: {
+        "id": 57, "email": "recruiter@example.test",
+    })
     monkeypatch.setattr(api_module.nexus_delivery, "queue_latest_resume_if_ready", lambda cid, user, **kwargs: {
         "resume_id": resume["id"],
     })
@@ -4643,6 +4646,11 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
             options = await client.get("/nexus/taxonomy")
             assert options.status_code == 200
             assert options.json()["rows"][0]["offering"] == "Physician"
+            recruiters = await client.get("/nexus/recruiters")
+            assert recruiters.status_code == 200
+            assert recruiters.json()["rows"] == [{
+                "id": 57, "name": "recruiter@example.test",
+            }]
             invalid = await client.post("/candidates/nexus-classification/batch", json={
                 "candidate_ids": [candidate_id], "offering": "Nursing",
                 "profession": "Physician", "specialty": "Hematology/Oncology",
@@ -4651,6 +4659,7 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
             valid = await client.post("/candidates/nexus-classification/batch", json={
                 "candidate_ids": [candidate_id], "offering": "Physician",
                 "profession": "Physician", "specialty": "Hematology/Oncology",
+                "recruiter_id": 999,
             })
             assert valid.status_code == 200, valid.text
             assert valid.json()["requeued"] == 1
@@ -4659,7 +4668,7 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
     route = store.get_candidate_ats_route(candidate_id, "local")
     assert route["eligibility"]["nexus_classification"] == {
         "offering": "Physician", "profession": "Physician",
-        "specialty": "Hematology/Oncology",
+        "specialty": "Hematology/Oncology", "recruiter_id": 57,
     }
     assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "pending"
     assert store.get_nexus_delivery_for_resume(resume["id"])["operation"] == "classification_refresh"
@@ -4703,6 +4712,9 @@ def test_nexus_first_upload_waits_for_explicit_classification_hold(monkeypatch):
         {"offering": "Physician", "profession": "Physician",
          "specialty": "Hematology/Oncology"},
     ])
+    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor: {
+        "id": 57, "email": "recruiter@example.test",
+    })
     candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
     api_module._set_nexus_classification_hold([candidate_id], "local")
     candidate = store.get_candidate(candidate_id)
@@ -4746,7 +4758,7 @@ def test_nexus_first_upload_waits_for_explicit_classification_hold(monkeypatch):
     )
     assert payload["candidate"]["nexus_classification"] == {
         "offering": "Physician", "profession": "Physician",
-        "specialty": "Hematology/Oncology",
+        "specialty": "Hematology/Oncology", "recruiter_id": 57,
     }
 
 

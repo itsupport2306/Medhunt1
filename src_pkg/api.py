@@ -247,6 +247,9 @@ class NexusClassificationIn(BaseModel):
     offering: str = Field(min_length=1, max_length=120)
     profession: str = Field(min_length=1, max_length=120)
     specialty: str = Field(min_length=1, max_length=240)
+    # Accepted for compatibility with the approved 3.37.29 client. The server
+    # always replaces it with the recruiter resolved from the signed-in email.
+    recruiter_id: int | None = Field(default=None, gt=0)
 
 
 class ResumeDownloadIn(BaseModel):
@@ -1168,6 +1171,26 @@ def nexus_supported_classifications(request: Request):
     return {"rows": rows}
 
 
+def _nexus_recruiter_for_actor(actor: dict) -> dict:
+    user_id = str(actor.get("sub") or "local")
+    email = str(actor.get("email") or "").strip().casefold()
+    try:
+        return nexus_delivery.recruiter_for_email(user_id, email)
+    except nexus_sync.NexusPermanentError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except nexus_sync.NexusDeliveryError as exc:
+        raise HTTPException(503, "Nexus recruiter mapping is temporarily unavailable.") from exc
+
+
+@app.get("/nexus/recruiters")
+def nexus_supported_recruiters(request: Request):
+    actor = _request_user(request)
+    if ats_routing.destination_for(actor) != "nexus":
+        raise HTTPException(409, "Your organization is assigned to Ceipal.")
+    recruiter = _nexus_recruiter_for_actor(actor)
+    return {"rows": [{"id": recruiter["id"], "name": recruiter["email"]}]}
+
+
 def _set_nexus_classification_hold(candidate_ids: list[int], user_id: str) -> list[int]:
     newly_held = []
     for candidate_id in dict.fromkeys(candidate_ids):
@@ -1208,13 +1231,14 @@ def set_nexus_classification(body: NexusClassificationIn, request: Request):
     if len(store.get_candidates(candidate_ids)) != len(candidate_ids):
         raise HTTPException(404, "One or more candidates were not found.")
     user_id = str(actor.get("sub") or "local")
+    recruiter = _nexus_recruiter_for_actor(actor)
     if any(
         (store.get_candidate_ats_route(candidate_id, user_id) or {}).get("destination") == "ceipal"
         for candidate_id in candidate_ids
     ):
         raise HTTPException(409, "Ceipal candidates cannot be classified for Nexus.")
     selected = {"offering": row.offering, "profession": row.profession,
-                "specialty": row.specialty}
+                "specialty": row.specialty, "recruiter_id": recruiter["id"]}
     requeued = 0
     nexus_available = None
     for candidate_id in candidate_ids:
