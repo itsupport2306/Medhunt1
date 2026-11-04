@@ -1171,12 +1171,20 @@ def nexus_supported_classifications(request: Request):
     return {"rows": rows}
 
 
-def _nexus_recruiter_for_actor(actor: dict) -> dict:
+def _nexus_recruiter_for_actor(actor: dict, *, allow_unmapped: bool = False) -> dict | None:
     user_id = str(actor.get("sub") or "local")
     email = str(actor.get("email") or "").strip().casefold()
     try:
         return nexus_delivery.recruiter_for_email(user_id, email)
     except nexus_sync.NexusPermanentError as exc:
+        # Classification and candidate delivery can proceed without a recruiter
+        # when Nexus has no active recruiter row for the authenticated email.
+        # Keep configuration and other permanent failures visible to callers.
+        if allow_unmapped and exc.code in {
+            "nexus_recruiter_email_missing",
+            "nexus_recruiter_email_unmapped",
+        }:
+            return None
         raise HTTPException(409, str(exc)) from exc
     except nexus_sync.NexusDeliveryError as exc:
         raise HTTPException(503, "Nexus recruiter mapping is temporarily unavailable.") from exc
@@ -1188,6 +1196,8 @@ def nexus_supported_recruiters(request: Request):
     if ats_routing.destination_for(actor) != "nexus":
         raise HTTPException(409, "Your organization is assigned to Ceipal.")
     recruiter = _nexus_recruiter_for_actor(actor)
+    if recruiter is None:
+        return {"rows": []}
     return {"rows": [{"id": recruiter["id"], "name": recruiter["email"]}]}
 
 
@@ -1231,14 +1241,16 @@ def set_nexus_classification(body: NexusClassificationIn, request: Request):
     if len(store.get_candidates(candidate_ids)) != len(candidate_ids):
         raise HTTPException(404, "One or more candidates were not found.")
     user_id = str(actor.get("sub") or "local")
-    recruiter = _nexus_recruiter_for_actor(actor)
+    recruiter = _nexus_recruiter_for_actor(actor, allow_unmapped=True)
     if any(
         (store.get_candidate_ats_route(candidate_id, user_id) or {}).get("destination") == "ceipal"
         for candidate_id in candidate_ids
     ):
         raise HTTPException(409, "Ceipal candidates cannot be classified for Nexus.")
     selected = {"offering": row.offering, "profession": row.profession,
-                "specialty": row.specialty, "recruiter_id": recruiter["id"]}
+                "specialty": row.specialty}
+    if recruiter:
+        selected["recruiter_id"] = recruiter["id"]
     requeued = 0
     nexus_available = None
     for candidate_id in candidate_ids:
@@ -1257,7 +1269,18 @@ def set_nexus_classification(body: NexusClassificationIn, request: Request):
         )
         if queued and store.requeue_nexus_classification(candidate_id, int(queued["resume_id"]), user_id):
             requeued += 1
-    return {"saved": len(candidate_ids), "requeued": requeued, "classification": selected}
+    result = {
+        "saved": len(candidate_ids),
+        "requeued": requeued,
+        "classification": selected,
+        "recruiter_assigned": recruiter is not None,
+    }
+    if recruiter is None:
+        result["warning"] = (
+            "No active Nexus recruiter matches your signed-in email. "
+            "The selected candidates will be sent without a recruiter assignment."
+        )
+    return result
 
 
 @app.get("/candidates")

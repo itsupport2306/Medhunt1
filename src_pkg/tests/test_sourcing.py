@@ -48,6 +48,7 @@ from sourcing import (
     ceipal_delivery,
     contact_lookup_queue,
     zoom_sms,
+    nexus_sync,
 )
 
 # Tests always use isolated SQLite and mocked object storage, regardless of the
@@ -4633,7 +4634,7 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
         {"offering": "Physician", "profession": "Physician",
          "specialty": "Hematology/Oncology"},
     ])
-    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor: {
+    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor, **kwargs: {
         "id": 57, "email": "recruiter@example.test",
     })
     monkeypatch.setattr(api_module.nexus_delivery, "queue_latest_resume_if_ready", lambda cid, user, **kwargs: {
@@ -4663,6 +4664,7 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
             })
             assert valid.status_code == 200, valid.text
             assert valid.json()["requeued"] == 1
+            assert valid.json()["recruiter_assigned"] is True
 
     asyncio.run(exercise())
     route = store.get_candidate_ats_route(candidate_id, "local")
@@ -4677,6 +4679,51 @@ def test_nexus_classification_selection_validates_and_requeues_linked_candidate(
         store.get_candidate(candidate_id), store.get_resume(candidate_id, resume["id"]),
     )
     assert payload["candidate"]["nexus_classification"] == route["eligibility"]["nexus_classification"]
+
+
+def test_nexus_classification_proceeds_without_mapped_recruiter(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    candidate_id = store.add_candidate("Raja Flores", "Columbus, OH", source="sharecare")
+    resume = store.attach_resume(candidate_id, "raja.pdf", b"%PDF-test", queue_nexus=True)
+    monkeypatch.setattr(api_module.nexus_delivery, "supported_taxonomy_rows", lambda user: [
+        {"offering": "Physician", "profession": "Physician",
+         "specialty": "Hematology/Oncology"},
+    ])
+
+    def unmapped_recruiter(user_id, email):
+        raise nexus_sync.NexusPermanentError(
+            "Your signed-in email is not mapped to one active Nexus recruiter.",
+            operation="recruiter_resolution", code="nexus_recruiter_email_unmapped",
+        )
+
+    monkeypatch.setattr(api_module.nexus_delivery, "recruiter_for_email", unmapped_recruiter)
+    monkeypatch.setattr(api_module.nexus_delivery, "queue_latest_resume_if_ready", lambda cid, user, **kwargs: {
+        "resume_id": resume["id"],
+    })
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/candidates/nexus-classification/batch", json={
+                "candidate_ids": [candidate_id], "offering": "Physician",
+                "profession": "Physician", "specialty": "Hematology/Oncology",
+            })
+            assert response.status_code == 200, response.text
+            body = response.json()
+            assert body["saved"] == 1
+            assert body["requeued"] == 0
+            assert body["recruiter_assigned"] is False
+            assert "without a recruiter assignment" in body["warning"]
+            assert "recruiter_id" not in body["classification"]
+
+    asyncio.run(exercise())
+    route = store.get_candidate_ats_route(candidate_id, "local")
+    assert route["eligibility"]["nexus_classification"] == {
+        "offering": "Physician", "profession": "Physician",
+        "specialty": "Hematology/Oncology",
+    }
+    assert store.get_nexus_delivery_for_resume(resume["id"])["status"] == "pending"
 
 
 def test_legacy_extension_resume_queues_nexus_without_manual_classification(monkeypatch):
@@ -4712,7 +4759,7 @@ def test_nexus_first_upload_waits_for_explicit_classification_hold(monkeypatch):
         {"offering": "Physician", "profession": "Physician",
          "specialty": "Hematology/Oncology"},
     ])
-    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor: {
+    monkeypatch.setattr(api_module, "_nexus_recruiter_for_actor", lambda actor, **kwargs: {
         "id": 57, "email": "recruiter@example.test",
     })
     candidate_id = store.add_candidate("Dr. Avery Smith", "Iowa Falls, IA", source="sharecare")
