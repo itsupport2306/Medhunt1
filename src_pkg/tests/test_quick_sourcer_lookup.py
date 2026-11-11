@@ -78,6 +78,23 @@ def _candidate(name="Joseph Antario", location="Nazareth, Pennsylvania"):
     return store.add_candidate(name, location, source="indeed", source_id=name.lower())
 
 
+def test_record_endpoints_keep_raw_provider_response_private(monkeypatch):
+    provider_result = {
+        "status": "found",
+        "candidate": {"name": "Example Nurse"},
+        "api_response": {"http_status": 200, "body": {"private": "provider data"}},
+    }
+    monkeypatch.setattr(quick_sourcer_client, "find", lambda *args, **kwargs: provider_result)
+    monkeypatch.setattr(quick_sourcer_client, "fetch", lambda *args, **kwargs: provider_result)
+
+    search = api_module.records_find(api_module.QuickSourcerFindIn(name="Example Nurse"))
+    by_id = api_module.records_candidate(42)
+
+    assert "api_response" not in search
+    assert "api_response" not in by_id
+    assert search["candidate"]["name"] == by_id["candidate"]["name"] == "Example Nurse"
+
+
 def test_lookup_stores_and_returns_every_delivered_contact(quick_sourcer_enabled, monkeypatch):
     calls = _stub_api(monkeypatch, FOUND_PAYLOAD)
     candidate_id = _candidate()

@@ -2458,7 +2458,9 @@ def records_find(body: QuickSourcerFindIn):
     result = quick_sourcer_client.find(
         name, location, candidate_id=candidate_id, refresh=body.refresh,
     )
-    return {**result, "candidate_id": candidate_id or None, "searched": {"name": name, "location": location}}
+    return {**{key: value for key, value in result.items() if key != "api_response"},
+            "candidate_id": candidate_id or None,
+            "searched": {"name": name, "location": location}}
 
 
 @app.get("/records/candidates/{external_id}")
@@ -2466,7 +2468,7 @@ def records_candidate(external_id: int, refresh: bool = False):
     result = quick_sourcer_client.fetch(external_id, refresh=refresh)
     if result.get("status") == "not_found":
         raise HTTPException(404, "No record exists with that id.")
-    return result
+    return {key: value for key, value in result.items() if key != "api_response"}
 
 
 # ---- do-not-contact ----
