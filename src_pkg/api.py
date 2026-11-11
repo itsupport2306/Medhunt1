@@ -326,6 +326,12 @@ class HaloBackfillBatchIn(BaseModel):
     profiles: list[HaloBackfillProfileIn] = Field(min_length=1, max_length=100)
 
 
+class HaloLookupResponseIn(BaseModel):
+    user_id: str = Field(min_length=1, max_length=80)
+    run_id: str = Field(min_length=8, max_length=80)
+    candidate_id: int = Field(gt=0)
+
+
 class NexusDeliverySummaryIn(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=100)
 
@@ -603,6 +609,29 @@ def halo_api_monitor():
     }
 
 
+@app.post("/internal/halo/lookup-response")
+def halo_lookup_response(body: HaloLookupResponseIn):
+    """Read a completed lookup on demand; never delay the extension result."""
+    data = store.list_contact_lookup_jobs(
+        body.run_id, [body.candidate_id], requested_by=body.user_id,
+    )
+    job = next((item for item in data["items"]
+                if int(item["candidate_id"]) == body.candidate_id), None)
+    if not job:
+        return {"available": False, "message": "No saved lookup exists for this event."}
+    if job["status"] not in {"succeeded", "not_found", "blocked", "failed"}:
+        return {"available": False, "message": "This lookup is still in progress."}
+    result = job.get("result") or {}
+    raw = result.get("api_response")
+    return {
+        "available": raw is not None,
+        "api_response": raw,
+        "lookup_status": result.get("status") or job["status"],
+        "error": result.get("error") or "",
+        "message": "" if raw is not None else "No API response was saved for this lookup.",
+    }
+
+
 @app.post("/internal/halo/contact-backfill")
 def enqueue_halo_contact_backfill(body: HaloBackfillBatchIn):
     """Stage Halo Neon profiles in the shared low-priority lookup queue."""
@@ -748,12 +777,12 @@ def _public_contact_lookup_job(item: dict) -> dict:
     request_id = "LQ-" + hashlib.sha256(
         str(item.get("job_key") or item.get("id") or "").encode()
     ).hexdigest()[:12].upper()
+    result = dict(item.get("result") or {})
+    result.pop("api_response", None)
     return {
         "request_id": request_id,
-        **{
-            key: item.get(key)
-            for key in ("candidate_id", "status", "attempts", "position", "result")
-        },
+        **{key: item.get(key) for key in ("candidate_id", "status", "attempts", "position")},
+        "result": result,
     }
 
 
@@ -1668,6 +1697,7 @@ def enrich_one(cid: int, request: Request = None):
         and result.get("ats_destination", "nexus") == "nexus"
     ):
         nexus_delivery.queue_latest_resume_if_ready(cid, str(actor.get("sub") or "local"))
+    result.pop("api_response", None)
     return result
 
 
@@ -1913,7 +1943,10 @@ def _quick_sourcer_lookup_batch(body: ContactLookupBatchIn, actor: dict) -> dict
                 )
     return {
         "status": "ok",
-        "results": results,
+        "results": {
+            key: {field: value for field, value in item.items() if field != "api_response"}
+            for key, item in results.items()
+        },
         "processed": len(results),
         "matched": sum(
             1 for result in results.values() if result.get("status") == "found"

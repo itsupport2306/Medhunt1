@@ -56,20 +56,25 @@ def _terminal(job: dict, status: str, result: dict) -> dict:
     return {"status": status, "job_id": int(job["id"])}
 
 
-def _retry(job: dict, reason: str) -> dict:
+def _retry(job: dict, reason: str, result: dict | None = None) -> dict:
     attempts = max(1, int(job.get("attempts") or 1))
     if attempts >= _MAX_ATTEMPTS:
+        failure = dict(result or {})
         result = {
             "status": "failed", "emails": [], "phones": [],
             "phone_contacts": [], "resume_required": False,
             "location_match": None,
+            "error": str(failure.get("error") or reason),
         }
+        if failure.get("api_response") is not None:
+            result["api_response"] = failure["api_response"]
         if str(job.get("job_source") or "") == "halo_backfill":
             try:
                 healthboard_auth.report_halo_profile_backfill(
                     profile_id=str(job.get("external_ref") or ""),
                     candidate_id=int(job["candidate_id"]), status="failed",
-                    result=result, attempts=attempts,
+                    result={key: value for key, value in result.items() if key != "api_response"},
+                    attempts=attempts,
                 )
             except Exception:
                 logging.getLogger("medhunt.lookup").warning(
@@ -110,7 +115,7 @@ def _process_job(job: dict) -> dict:
             candidate_id, candidate=candidate,
         )
         if result.get("status") == "failed":
-            return _retry(job, "temporary_lookup_failure")
+            return _retry(job, "temporary_lookup_failure", result)
         if str(job.get("job_source") or "") == "halo_backfill":
             # Callback before making the queue item terminal. If Halo is
             # temporarily unavailable, retrying reuses the Quick Sourcer cache
@@ -119,7 +124,7 @@ def _process_job(job: dict) -> dict:
                 profile_id=str(job.get("external_ref") or ""),
                 candidate_id=candidate_id,
                 status=str(result.get("status") or "failed"),
-                result=result,
+                result={key: value for key, value in result.items() if key != "api_response"},
                 attempts=int(job.get("attempts") or 0),
             )
             status = "succeeded" if result.get("status") == "found" else "not_found"

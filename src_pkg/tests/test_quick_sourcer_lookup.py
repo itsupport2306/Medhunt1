@@ -304,6 +304,7 @@ def test_a_miss_is_reported_as_a_miss(quick_sourcer_enabled, monkeypatch):
     assert result == {
         "status": "not_found", "emails": [], "phones": [], "phone_contacts": [],
         "resume_required": False, "location_match": None,
+        "api_response": {"http_status": 200, "body": {"found": False}},
     }
     assert store.get_candidate(candidate_id)["enrich_status"] == "no_match"
 
@@ -402,3 +403,58 @@ def test_provider_found_response_is_not_rejected_by_identity_checks(quick_source
 
     assert result["status"] == "found"
     assert store.get_candidate(candidate_id)["addresses"] == []
+@pytest.mark.parametrize("status,payload", [
+    ("found", FOUND_PAYLOAD),
+    ("not_found", {"found": False}),
+])
+def test_raw_response_is_saved_and_hidden_from_extension_poll(
+    quick_sourcer_enabled, monkeypatch, status, payload,
+):
+    _stub_api(monkeypatch, payload)
+    candidate_id = _candidate(f"Raw {status} Nurse", "Columbus, Ohio")
+    result = quick_sourcer_client.lookup_candidate(candidate_id)
+    assert result["status"] == status
+    assert result["api_response"] == {"http_status": 200, "body": payload}
+
+    store.enqueue_contact_lookup_jobs("raw-run-123", [candidate_id], "recruiter-one")
+    job = store.claim_contact_lookup_job()
+    store.finish_contact_lookup_job(
+        job["id"], "succeeded" if status == "found" else "not_found", result,
+    )
+    saved = store.list_contact_lookup_jobs(
+        "raw-run-123", [candidate_id], "recruiter-one",
+    )["items"][0]
+    assert "api_response" not in api_module._public_contact_lookup_job(saved)["result"]
+    detail = api_module.halo_lookup_response(api_module.HaloLookupResponseIn(
+        user_id="recruiter-one", run_id="raw-run-123", candidate_id=candidate_id,
+    ))
+    assert detail["available"] is True
+    assert detail["api_response"] == {"http_status": 200, "body": payload}
+    assert api_module.halo_lookup_response(api_module.HaloLookupResponseIn(
+        user_id="other-recruiter", run_id="raw-run-123", candidate_id=candidate_id,
+    ))["available"] is False
+
+
+def test_failed_http_body_survives_terminal_queue_result(quick_sourcer_enabled, monkeypatch):
+    request = httpx.Request("POST", "https://quick-sourcer.test/find")
+    response = httpx.Response(503, request=request, json={"error": "source busy"})
+
+    def fail_call(*_args):
+        raise httpx.HTTPStatusError("source busy", request=request, response=response)
+
+    monkeypatch.setattr(quick_sourcer_client, "_call", fail_call)
+    candidate_id = _candidate("Busy Source Nurse", "Columbus, Ohio")
+    result = quick_sourcer_client.lookup_candidate(candidate_id)
+    assert result["status"] == "failed"
+    assert result["api_response"] == {
+        "http_status": 503, "body": {"error": "source busy"},
+    }
+    store.enqueue_contact_lookup_jobs("failed-run-123", [candidate_id], "recruiter-one")
+    job = store.claim_contact_lookup_job()
+    job["attempts"] = 3
+    contact_lookup_queue._retry(job, "temporary_lookup_failure", result)
+    detail = api_module.halo_lookup_response(api_module.HaloLookupResponseIn(
+        user_id="recruiter-one", run_id="failed-run-123", candidate_id=candidate_id,
+    ))
+    assert detail["available"] is True
+    assert detail["api_response"] == result["api_response"]
