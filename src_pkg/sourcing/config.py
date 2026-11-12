@@ -283,9 +283,25 @@ QUICK_SOURCER_TIMEOUT = max(10.0, float(os.getenv("QUICK_SOURCER_TIMEOUT", "150"
 CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER = max(
     1, min(80, int(os.getenv("CONTACT_LOOKUP_MAX_OUTSTANDING_PER_USER", "10"))),
 )
-# Hard cap across all Quick Sourcer lookup workers.
-CONTACT_LOOKUP_MAX_CONCURRENT = max(
+# A Render web instance has to share memory with resume parsing, PDF rendering,
+# database connections, and ATS delivery. Do not start 80 lookup threads on a
+# small hosted instance simply because the upstream Quick Sourcer has 80 slots.
+CONTACT_LOOKUP_REQUESTED_CONCURRENT = max(
     1, min(80, int(os.getenv("CONTACT_LOOKUP_MAX_CONCURRENT", "80"))),
+)
+CONTACT_LOOKUP_MEMORY_SAFE_CAP = max(
+    1, min(80, int(os.getenv("CONTACT_LOOKUP_MEMORY_SAFE_CAP", "8"))),
+)
+try:
+    _render_cpu_count = float(os.getenv("RENDER_CPU_COUNT", "0") or "0")
+except ValueError:
+    _render_cpu_count = 0.0
+# Render's 0.5 CPU plan is the 512 MB instance. Treat an absent CPU value as
+# constrained too, so a service does not silently start 80 workers.
+_small_render_instance = _hosted_runtime and _render_cpu_count <= 0.5
+CONTACT_LOOKUP_MAX_CONCURRENT = min(
+    CONTACT_LOOKUP_REQUESTED_CONCURRENT,
+    CONTACT_LOOKUP_MEMORY_SAFE_CAP if _small_render_instance else 80,
 )
 # Halo's overnight Neon backfill shares the durable queue but may occupy only
 # this many slots. Interactive extension jobs can use every remaining slot and
@@ -294,6 +310,7 @@ CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT = max(
     1,
     min(
         CONTACT_LOOKUP_MAX_CONCURRENT,
+        max(1, CONTACT_LOOKUP_MAX_CONCURRENT // 4) if _small_render_instance else 80,
         int(os.getenv("CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT", "10")),
     ),
 )

@@ -767,6 +767,7 @@ def contact_lookup_queue_status(body: ContactLookupBatchIn, request: Request):
     data = store.list_contact_lookup_jobs(
         body.run_id, body.candidate_ids,
         requested_by=owner,
+        include_api_response=False,
     )
     return {**data, "paused": store.contact_lookup_paused(owner), "items": [
         _public_contact_lookup_job(item) for item in data["items"]

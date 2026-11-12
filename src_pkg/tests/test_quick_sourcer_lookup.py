@@ -441,6 +441,12 @@ def test_raw_response_is_saved_and_hidden_from_extension_poll(
     saved = store.list_contact_lookup_jobs(
         "raw-run-123", [candidate_id], "recruiter-one",
     )["items"][0]
+    assert saved["result"]["api_response"] == {"http_status": 200, "body": payload}
+    polled = store.list_contact_lookup_jobs(
+        "raw-run-123", [candidate_id], "recruiter-one",
+        include_api_response=False,
+    )["items"][0]
+    assert "api_response" not in polled["result"]
     assert "api_response" not in api_module._public_contact_lookup_job(saved)["result"]
     detail = api_module.halo_lookup_response(api_module.HaloLookupResponseIn(
         user_id="recruiter-one", run_id="raw-run-123", candidate_id=candidate_id,

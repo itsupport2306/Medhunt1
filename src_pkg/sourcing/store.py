@@ -2930,7 +2930,10 @@ def defer_contact_lookup_job(job_id: int, reason: str = "user_paused") -> None:
         )
 
 
-def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str = "") -> dict:
+def list_contact_lookup_jobs(
+    run_id: str, candidate_ids=None, requested_by: str = "",
+    *, include_api_response: bool = True,
+) -> dict:
     normalized_run = str(run_id or "").strip()
     ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     where = "WHERE run_id=?"
@@ -2942,24 +2945,29 @@ def list_contact_lookup_jobs(run_id: str, candidate_ids=None, requested_by: str 
         where += " AND candidate_id IN (" + ",".join("?" for _ in ids) + ")"
         args.extend(ids)
     with _conn() as connection:
-        rows = connection.execute(
-            f"SELECT * FROM contact_lookup_queue {where} ORDER BY created,id", args,
-        ).fetchall()
         active_rows = connection.execute(
             """SELECT id FROM contact_lookup_queue
                WHERE status IN ('queued','retry','processing')
                ORDER BY priority DESC,created,id"""
         ).fetchall()
-    positions = {int(row["id"]): index for index, row in enumerate(active_rows)}
-    items = []
-    for row in rows:
-        item = dict(row)
-        try:
-            item["result"] = json.loads(item.get("result") or "{}")
-        except (TypeError, ValueError):
-            item["result"] = {}
-        item["position"] = positions.get(int(item["id"]), 0)
-        items.append(item)
+        positions = {int(row["id"]): index for index, row in enumerate(active_rows)}
+        items = []
+        # A completed job may contain the full upstream API body. Iterate the
+        # cursor so frequent status polls do not hold every raw body at once.
+        rows = connection.execute(
+            f"SELECT * FROM contact_lookup_queue {where} ORDER BY created,id", args,
+        )
+        for row in rows:
+            item = dict(row)
+            try:
+                parsed_result = json.loads(item.get("result") or "{}")
+                item["result"] = parsed_result if isinstance(parsed_result, dict) else {}
+            except (TypeError, ValueError):
+                item["result"] = {}
+            if not include_api_response:
+                item["result"].pop("api_response", None)
+            item["position"] = positions.get(int(item["id"]), 0)
+            items.append(item)
     return {
         "run_id": normalized_run,
         "items": items,

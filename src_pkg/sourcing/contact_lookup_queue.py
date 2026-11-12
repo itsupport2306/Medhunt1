@@ -202,6 +202,12 @@ def start() -> None:
     with _THREAD_LOCK:
         if any(thread.is_alive() for thread in _THREADS):
             return
+        logging.getLogger("medhunt.lookup").info(
+            "Starting %s lookup workers (requested %s; backfill cap %s).",
+            config.CONTACT_LOOKUP_MAX_CONCURRENT,
+            config.CONTACT_LOOKUP_REQUESTED_CONCURRENT,
+            config.CONTACT_LOOKUP_BACKFILL_MAX_CONCURRENT,
+        )
         _STOP.clear()
         _THREADS = [
             threading.Thread(
