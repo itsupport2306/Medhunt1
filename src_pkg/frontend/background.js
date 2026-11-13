@@ -421,6 +421,9 @@ chrome.downloads.onCreated.addListener((download) => {
     await linkedinClaim;
     const capture = await chrome.storage.local.get(["radixsolResumeCapturing"]);
     if (!capture.radixsolResumeCapturing) return;
+    // Ignore our own enriched PDF downloads while the next Indeed resume is
+    // being captured. They carry another candidate's contact sheet.
+    if (!isIndeedResumeDownload(download)) return;
     const url = download.finalUrl || download.url || "";
     if (!url) return;
     await chrome.storage.local.set({

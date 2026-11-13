@@ -1382,6 +1382,10 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes, user_id: str = "loca
     candidate = store.get_candidate(cid)
     if not candidate:
         raise HTTPException(404, "candidate not found")
+    try:
+        data = resume_enrichment.normalize_captured_resume(data, cid)
+    except resume_enrichment.ContactSheetRefreshError as exc:
+        raise HTTPException(409, str(exc)) from exc
     contactable = contact_access.project_candidate(candidate)
     # Read the original PDF before the Medhunt contact page is prepended. Text
     # PDFs stay local and fast; only sparse/image-only pages invoke local OCR.

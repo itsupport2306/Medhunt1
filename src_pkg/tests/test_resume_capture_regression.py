@@ -9,12 +9,12 @@ import sys
 
 import httpx
 import pytest
-from pypdf import PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import api as api_module
-from sourcing import config, nexus_delivery, nexus_sync, store
+from sourcing import config, nexus_delivery, nexus_sync, resume_enrichment, store
 
 
 @pytest.mark.parametrize("source", ["indeed", "vivian", "facebook", "npino"])
@@ -80,3 +80,52 @@ def test_resume_attach_and_download_with_nexus_enabled(source, monkeypatch, tmp_
                 ]
 
     asyncio.run(exercise())
+
+
+def test_foreign_and_stacked_medhunt_resumes_are_rejected_before_storage():
+    store.reset()
+    correct_id = store.add_candidate("George Example", "East Stroudsburg, PA", source="indeed")
+    foreign_id = store.add_candidate("Shatabia Example", "Willingboro, NJ", source="indeed")
+    source = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.write(source)
+    foreign, embedded = resume_enrichment.add_contact_sheet(source.getvalue(), {
+        "id": foreign_id,
+        "name": "Shatabia Example",
+        "emails": ["shatabia@example.test"],
+    })
+    assert embedded
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                f"/candidates/{correct_id}/resume/from-browser",
+                json={"content_base64": base64.b64encode(foreign).decode(), "filename": "resume.pdf"},
+            )
+            assert response.status_code == 409
+            assert "different Medhunt candidate" in response.json()["detail"]
+            assert store.list_resumes(correct_id) == []
+
+    asyncio.run(exercise())
+
+    same_candidate, embedded = resume_enrichment.add_contact_sheet(source.getvalue(), {
+        "id": correct_id,
+        "name": "George Example",
+        "emails": ["george@example.test"],
+    })
+    assert embedded
+    normalized = resume_enrichment.normalize_captured_resume(same_candidate, correct_id)
+    assert len(PdfReader(BytesIO(normalized)).pages) == 1
+
+    stacked, embedded = resume_enrichment.add_contact_sheet(foreign, {
+        "id": correct_id,
+        "name": "George Example",
+        "emails": ["george@example.test"],
+    })
+    assert embedded
+    with pytest.raises(resume_enrichment.ContactSheetRefreshError, match="multiple candidates"):
+        resume_enrichment.normalize_captured_resume(stacked, correct_id)
+    with pytest.raises(resume_enrichment.ContactSheetRefreshError, match="multiple candidates"):
+        resume_enrichment.refresh_contact_sheet(stacked, {"id": correct_id, "emails": []})
