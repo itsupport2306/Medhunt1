@@ -2390,6 +2390,18 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
             and bool(re.match(r"^/doctor/[^/?#]+-overview/?$", path, re.IGNORECASE)),
             "WebMD",
         ),
+        "healthgrades": (
+            lambda host, path: (host == "healthgrades.com" or host.endswith(".healthgrades.com"))
+            and bool(re.fullmatch(
+                r"/(?:physician|doctor|provider|dentist|nurse-practitioner|physician-assistant|"
+                r"psychologist|chiropractor|physical-therapist|occupational-therapist|optometrist|"
+                r"podiatrist|pharmacist|social-worker|counselor|dietitian|midwife|audiologist|"
+                r"speech-language-pathologist)/[a-z0-9][a-z0-9-]{1,160}/?"
+                r"|/[^/]+/dr-[a-z0-9][a-z0-9-]{1,160}/?",
+                path, re.IGNORECASE,
+            )),
+            "Healthgrades",
+        ),
         "npino": (
             lambda host, path: (host == "npino.com" or host.endswith(".npino.com"))
             and bool(re.match(r"^/[^/]+/\d{10}(?:-[^/]+)?/?$", path, re.IGNORECASE)),

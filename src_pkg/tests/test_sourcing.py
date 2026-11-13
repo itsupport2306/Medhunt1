@@ -3779,6 +3779,33 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
             )
             assert sharecare_resume.status_code == 200, sharecare_resume.text
 
+            healthgrades_id = store.add_candidate(
+                "John Dekker", "Bethesda, MD", source="healthgrades",
+                source_url="https://www.healthgrades.com/physician/dr-john-dekker-233ck",
+                source_id="dr-john-dekker-233ck",
+            )
+            healthgrades_body = {
+                **sharecare_body,
+                "source_label": "Healthgrades",
+                "source_url": "https://www.healthgrades.com/physician/dr-john-dekker-233ck",
+                "headline": "Medical Microbiology",
+                "summary": "Public Healthgrades professional overview.",
+                "specialties": ["Medical Microbiology"],
+                "npi": "1234567893",
+            }
+            healthgrades_resume = await client.post(
+                f"/candidates/{healthgrades_id}/professional-profile-resume",
+                json=healthgrades_body,
+            )
+            assert healthgrades_resume.status_code == 200, healthgrades_resume.text
+            assert healthgrades_resume.json()["resume"]["filename"].endswith(".pdf")
+
+            wrong_healthgrades_url = await client.post(
+                f"/candidates/{healthgrades_id}/professional-profile-resume",
+                json={**healthgrades_body, "source_url": "https://www.healthgrades.com/medical-microbiology-directory"},
+            )
+            assert wrong_healthgrades_url.status_code == 400
+
             npino_id = store.add_candidate(
                 "Ayumi E Belanger", "Green Cove Springs, FL", source="npino",
                 source_url="https://npino.com/nurse/1003001058-ms.-ayumi-e-belanger/",
