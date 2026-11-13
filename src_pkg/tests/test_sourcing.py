@@ -4855,6 +4855,27 @@ def test_extension_lookup_queue_holds_nexus_before_worker_starts(monkeypatch):
     assert api_module.nexus_delivery.classification_pending(candidate_id, "local")
 
 
+def test_ceipal_delivery_summary_reports_saved_results(monkeypatch):
+    from types import SimpleNamespace
+
+    actor = {"sub": "recruiter-1"}
+    request = SimpleNamespace(state=SimpleNamespace(user=actor))
+    rows = {
+        1: {"destination": "ceipal", "status": "uploaded", "eligibility": {"ceipal_upload": {"state": "uploaded_to_ceipal"}}},
+        2: {"destination": "ceipal", "status": "indeterminate", "last_error": "Referral source rejected", "eligibility": {"ceipal_upload": {"state": "indeterminate", "error": "Referral source rejected"}}},
+    }
+    monkeypatch.setattr(api_module.ats_routing, "destination_for", lambda _actor: "ceipal")
+    monkeypatch.setattr(store, "get_ceipal_delivery_summary_rows", lambda ids, owner: rows)
+    monkeypatch.setattr(store, "get_candidates", lambda ids: [])
+    monkeypatch.setattr(contact_access, "project_candidates", lambda candidates: [])
+    result = api_module.ceipal_delivery_summary(
+        api_module.NexusDeliverySummaryIn(candidate_ids=[1, 2]), request,
+    )
+    assert result["uploaded"] == 1
+    assert result["failed"] == 1
+    assert result["items"][1]["reason"] == "Referral source rejected"
+
+
 def test_nexus_classification_does_not_change_ceipal_candidate_route():
     store.reset()
     candidate_id = store.add_candidate("Ceipal Candidate", "Austin, TX", source="indeed")

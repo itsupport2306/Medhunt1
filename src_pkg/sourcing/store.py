@@ -944,6 +944,38 @@ def get_candidate_ats_route(candidate_id: int, user_id: str) -> dict | None:
     return result
 
 
+def get_ceipal_delivery_summary_rows(candidate_ids: list[int], user_id: str) -> dict[int, dict]:
+    """Read one recruiter's Ceipal route and most recent delivery result."""
+    ids = list(dict.fromkeys(int(value) for value in candidate_ids))
+    owner = str(user_id or "").strip()[:200]
+    if not ids or not owner:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with _conn() as connection:
+        rows = connection.execute(
+            f"SELECT candidate_id, destination, eligibility FROM medhunt_ats_routes "
+            f"WHERE user_id=? AND candidate_id IN ({placeholders})",
+            [owner, *ids],
+        ).fetchall()
+    result = {}
+    for row in rows:
+        item = dict(row)
+        try:
+            item["eligibility"] = json.loads(item.get("eligibility") or "{}")
+        except (TypeError, ValueError):
+            item["eligibility"] = {}
+        upload = item["eligibility"].get("ceipal_upload") or {}
+        item["status"] = {
+            "uploaded_to_ceipal": "uploaded",
+            "already_in_ceipal": "already_in_ceipal",
+            "indeterminate": "indeterminate",
+            "queued": "pending",
+        }.get(str(upload.get("state") or ""))
+        item["last_error"] = upload.get("error") or ""
+        result[int(item["candidate_id"])] = item
+    return result
+
+
 def set_candidate_ats_route(
     candidate_id: int, user_id: str, destination: str, eligibility=None,
 ) -> dict:
