@@ -1270,6 +1270,13 @@ def test_candidate_list_and_detail_project_only_current_trusted_contacts():
     asyncio.run(exercise_candidate_reads())
 
 
+def test_candidate_list_can_page_without_changing_unfiltered_store_reads():
+    store.reset()
+    ids = [store.add_candidate(f"Paging Person {index}") for index in range(3)]
+    assert [row["id"] for row in store.list_candidates(limit=2, offset=1)] == [ids[1], ids[0]]
+    assert len(store.list_candidates()) == 3
+
+
 def test_resume_storage_embeds_only_current_trusted_contacts():
     from pypdf import PdfReader, PdfWriter
 

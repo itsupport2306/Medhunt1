@@ -1356,11 +1356,14 @@ def set_nexus_classification(body: NexusClassificationIn, request: Request):
 
 
 @app.get("/candidates")
-def candidates(request: Request, job_id: int | None = None, stage: str | None = None):
+def candidates(request: Request, job_id: int | None = None, stage: str | None = None,
+               limit: int = 2000, offset: int = 0):
+    if not 1 <= limit <= 5000 or offset < 0:
+        raise HTTPException(422, "limit must be 1-5000 and offset cannot be negative")
     actor = _request_user(request)
     return [
         _public_candidate(row, actor)
-        for row in store.list_candidates(job_id=job_id, stage=stage)
+        for row in store.list_candidates(job_id=job_id, stage=stage, limit=limit, offset=offset)
     ]
 
 @app.get("/candidates/{cid}")

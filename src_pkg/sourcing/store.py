@@ -886,7 +886,7 @@ def add_candidates_bulk(rows, job_id=None):
     return ids
 
 
-def list_candidates(job_id=None, stage=None):
+def list_candidates(job_id=None, stage=None, limit=None, offset=0):
     query = "SELECT * FROM candidates"
     conditions, args = [], []
     if job_id is not None:
@@ -897,7 +897,10 @@ def list_candidates(job_id=None, stage=None):
         args.append(stage)
     if conditions:
         query += " WHERE " + " AND ".join(conditions)
-    query += " ORDER BY fit_score DESC, created DESC"
+    query += " ORDER BY fit_score DESC, created DESC, id DESC"
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        args.extend((int(limit), int(offset)))
     with _conn() as connection:
         return [_row(row) for row in connection.execute(query, args)]
 
