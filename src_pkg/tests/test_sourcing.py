@@ -60,7 +60,7 @@ config.PDL_API_KEY = ""
 config.PDL_ENABLED = False
 
 
-def test_ceipal_delivery_accepts_email_or_phone_without_resume(monkeypatch):
+def test_ceipal_delivery_requires_email_before_sending_to_halo(monkeypatch):
     delivered = []
     saved = []
     monkeypatch.setattr(store, "get_candidate", lambda cid: {"id": cid, "name": "Jane Smith", "location": "Boston, MA"})
@@ -71,15 +71,18 @@ def test_ceipal_delivery_accepts_email_or_phone_without_resume(monkeypatch):
     monkeypatch.setattr(healthboard_auth, "medhunt_ceipal_candidate", lambda **kwargs: (
         delivered.append(kwargs) or {"state": "uploaded_to_ceipal", "applicant_id": "app-1"}
     ))
-    for emails, phones in [(["jane@example.test"], []), ([], ["+16175550100"])]:
-        monkeypatch.setattr(contact_access, "project_candidate", lambda _candidate: {
-            "contacts_trusted": True, "emails": emails, "phones": phones,
-            "phone_contacts": [{"value": value, "kind": "mobile"} for value in phones],
-        })
-        assert ceipal_delivery.upload_candidate(12, "recruiter-1") == "uploaded"
-        assert delivered[-1]["candidate"]["emails"] == emails
-        assert delivered[-1]["candidate"]["phones"] == phones
-    assert len(saved) == 2
+    monkeypatch.setattr(contact_access, "project_candidate", lambda _candidate: {
+        "contacts_trusted": True, "emails": ["jane@example.test"], "phones": [],
+        "phone_contacts": [],
+    })
+    assert ceipal_delivery.upload_candidate(12, "recruiter-1") == "uploaded"
+    assert delivered[-1]["candidate"]["emails"] == ["jane@example.test"]
+    monkeypatch.setattr(contact_access, "project_candidate", lambda _candidate: {
+        "contacts_trusted": True, "emails": [], "phones": ["+16175550100"],
+        "phone_contacts": [{"value": "+16175550100", "kind": "mobile"}],
+    })
+    assert ceipal_delivery.upload_candidate(12, "recruiter-1") == "waiting_for_email"
+    assert len(delivered) == len(saved) == 1
 
 
 def test_ceipal_duplicate_result_is_idempotent(monkeypatch):
@@ -4863,17 +4866,22 @@ def test_ceipal_delivery_summary_reports_saved_results(monkeypatch):
     rows = {
         1: {"destination": "ceipal", "status": "uploaded", "eligibility": {"ceipal_upload": {"state": "uploaded_to_ceipal"}}},
         2: {"destination": "ceipal", "status": "indeterminate", "last_error": "Referral source rejected", "eligibility": {"ceipal_upload": {"state": "indeterminate", "error": "Referral source rejected"}}},
+        3: {"destination": "ceipal", "status": "", "eligibility": {}},
     }
     monkeypatch.setattr(api_module.ats_routing, "destination_for", lambda _actor: "ceipal")
     monkeypatch.setattr(store, "get_ceipal_delivery_summary_rows", lambda ids, owner: rows)
-    monkeypatch.setattr(store, "get_candidates", lambda ids: [])
-    monkeypatch.setattr(contact_access, "project_candidates", lambda candidates: [])
+    monkeypatch.setattr(store, "get_candidates", lambda ids: [{"id": 3}])
+    monkeypatch.setattr(contact_access, "project_candidates", lambda candidates: [{
+        "id": 3, "contacts_trusted": True, "emails": [], "phones": ["+16175550100"],
+    }])
     result = api_module.ceipal_delivery_summary(
-        api_module.NexusDeliverySummaryIn(candidate_ids=[1, 2]), request,
+        api_module.NexusDeliverySummaryIn(candidate_ids=[1, 2, 3]), request,
     )
     assert result["uploaded"] == 1
     assert result["failed"] == 1
     assert result["items"][1]["reason"] == "Referral source rejected"
+    assert result["not_sent"] == 1
+    assert result["items"][2]["reason"] == "No verified email address was found for Ceipal upload."
 
 
 def test_nexus_classification_does_not_change_ceipal_candidate_route():

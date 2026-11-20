@@ -709,11 +709,11 @@ def ceipal_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
         return {"enabled": False, "destination": "nexus", "selected": len(ids), "items": []}
     user_id = str(actor.get("sub") or "local")
     rows = store.get_ceipal_delivery_summary_rows(ids, user_id)
-    contactable_ids = {
+    emailable_ids = {
         int(candidate["id"])
         for candidate in contact_access.project_candidates(store.get_candidates(ids))
         if candidate.get("contacts_trusted") is True
-        and (candidate.get("emails") or candidate.get("phones"))
+        and candidate.get("emails")
     }
     counts = {key: 0 for key in ("uploaded", "pending", "already_in_ceipal", "waiting_for_resume", "not_sent", "failed")}
     items = []
@@ -733,8 +733,8 @@ def ceipal_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
             elif status in {"failed", "indeterminate"} or upload.get("state") == "indeterminate":
                 group = "failed"
                 reason = str(upload.get("error") or route.get("last_error") or "Ceipal delivery outcome could not be confirmed.")[:240]
-            elif candidate_id not in contactable_ids:
-                group, reason = "not_sent", "No verified email or phone number was found."
+            elif candidate_id not in emailable_ids:
+                group, reason = "not_sent", "No verified email address was found for Ceipal upload."
             else:
                 group, reason = "waiting_for_resume", "Resume has not been saved for Ceipal delivery."
         counts[group] += 1

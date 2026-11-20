@@ -48,6 +48,8 @@ def upload_candidate(candidate_id: int, user_id: str, resume_id: int | None = No
         projected.get("emails") or projected.get("phones")
     ):
         return "waiting_for_contact"
+    if not projected.get("emails"):
+        return "waiting_for_email"
     wireless_phones = [
         str(item.get("value") or "").strip()
         for item in projected.get("phone_contacts") or []
