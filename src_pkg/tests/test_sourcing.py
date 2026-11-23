@@ -4884,6 +4884,33 @@ def test_ceipal_delivery_summary_reports_saved_results(monkeypatch):
     assert result["items"][2]["reason"] == "No verified email address was found for Ceipal upload."
 
 
+def test_nexus_summary_does_not_await_classification_without_contacts(monkeypatch):
+    from types import SimpleNamespace
+
+    store.reset()
+    contactable_id = store.add_candidate("Contactable Person", "Austin, TX", source="indeed")
+    no_contact_id = store.add_candidate("No Contact Person", "Austin, TX", source="indeed")
+    actor = {"sub": "recruiter-1"}
+    request = SimpleNamespace(state=SimpleNamespace(user=actor))
+    monkeypatch.setattr(api_module.ats_routing, "destination_for", lambda _actor: "nexus")
+    monkeypatch.setattr(api_module.nexus_delivery, "enabled_for", lambda _user: True)
+    monkeypatch.setattr(api_module.nexus_delivery, "classification_pending", lambda _id, _user: True)
+    monkeypatch.setattr(contact_access, "project_candidates", lambda _candidates: [
+        {"id": contactable_id, "contacts_trusted": True, "emails": [], "phones": ["5125550100"]},
+        {"id": no_contact_id, "contacts_trusted": False, "emails": [], "phones": []},
+    ])
+
+    summary = api_module.nexus_delivery_summary(
+        api_module.NexusDeliverySummaryIn(candidate_ids=[contactable_id, no_contact_id]),
+        request,
+    )
+    assert summary["waiting_for_classification"] == 1
+    assert summary["not_uploaded"] == 1
+    assert summary["items"][0]["group"] == "waiting_for_classification"
+    assert summary["items"][1]["group"] == "not_uploaded"
+    assert summary["items"][1]["reason"] == "no_verified_contact"
+
+
 def test_nexus_classification_does_not_change_ceipal_candidate_route():
     store.reset()
     candidate_id = store.add_candidate("Ceipal Candidate", "Austin, TX", source="indeed")

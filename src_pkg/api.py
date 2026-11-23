@@ -682,22 +682,26 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
         }
     user_id = str(actor.get("sub") or "local")
     waiting_resume_ids = []
-    waiting_classification_ids = [
-        candidate_id for candidate_id in body.candidate_ids
-        if nexus_delivery.classification_pending(candidate_id, user_id)
-    ]
+    waiting_classification_ids = []
+    no_contact_ids = []
     nexus_enabled = nexus_delivery.enabled_for(user_id)
     if nexus_enabled:
         candidates = store.get_candidates(body.candidate_ids)
         for projected in contact_access.project_candidates(candidates):
+            candidate_id = int(projected["id"])
             if (
                 projected.get("contacts_trusted") is True
                 and (projected.get("emails") or projected.get("phones"))
             ):
-                waiting_resume_ids.append(int(projected["id"]))
+                waiting_resume_ids.append(candidate_id)
+                if nexus_delivery.classification_pending(candidate_id, user_id):
+                    waiting_classification_ids.append(candidate_id)
+            else:
+                no_contact_ids.append(candidate_id)
     return store.nexus_delivery_summary(
         body.candidate_ids, waiting_resume_ids=waiting_resume_ids,
         waiting_classification_ids=waiting_classification_ids,
+        no_contact_ids=no_contact_ids,
         enabled=nexus_enabled,
     )
 

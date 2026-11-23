@@ -2670,12 +2670,13 @@ def list_nexus_deliveries(candidate_id=None):
         return [dict(row) for row in rows]
 
 
-def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_classification_ids=(), enabled=None):
+def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_classification_ids=(), no_contact_ids=(), enabled=None):
     """Return the latest durable Nexus outcome for each requested candidate."""
     nexus_enabled = bool(config.NEXUS_SYNC_ENABLED) if enabled is None else bool(enabled)
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     waiting_resume_ids = {int(value) for value in waiting_resume_ids or []}
     waiting_classification_ids = {int(value) for value in waiting_classification_ids or []}
+    no_contact_ids = {int(value) for value in no_contact_ids or []}
     if not ordered_ids:
         return {
             "selected": 0, "uploaded": 0, "pending": 0,
@@ -2742,6 +2743,8 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
                 reason = "candidate_not_found"
             elif not nexus_enabled:
                 reason = "nexus_disabled"
+            elif candidate_id in no_contact_ids:
+                reason = "no_verified_contact"
             elif not resumes.get(candidate_id):
                 reason = "resume_not_saved"
             else:
