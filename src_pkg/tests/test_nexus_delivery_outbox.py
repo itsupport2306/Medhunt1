@@ -10,6 +10,32 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from sourcing import config, nexus_delivery, nexus_sync, store
 
 
+def test_delivery_summary_uses_organization_nexus_availability(monkeypatch):
+    class EmptyDeliveryConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, query, _args):
+            self.rows = [{"id": 123}] if "SELECT id FROM candidates" in query else []
+            return self
+
+        def fetchall(self):
+            return self.rows
+
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", False)
+    monkeypatch.setattr(store, "_conn", EmptyDeliveryConnection)
+    summary = store.nexus_delivery_summary([123], enabled=True)
+    assert summary["enabled"] is True
+    assert summary["items"][0]["reason"] == "resume_not_saved"
+
+    summary = store.nexus_delivery_summary([123], enabled=False)
+    assert summary["enabled"] is False
+    assert summary["items"][0]["reason"] == "nexus_disabled"
+
+
 def _resume_pdf(name="Jane Doe"):
     from reportlab.pdfgen import canvas
 

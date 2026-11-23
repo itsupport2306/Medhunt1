@@ -686,7 +686,8 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
         candidate_id for candidate_id in body.candidate_ids
         if nexus_delivery.classification_pending(candidate_id, user_id)
     ]
-    if nexus_delivery.enabled_for(user_id):
+    nexus_enabled = nexus_delivery.enabled_for(user_id)
+    if nexus_enabled:
         candidates = store.get_candidates(body.candidate_ids)
         for projected in contact_access.project_candidates(candidates):
             if (
@@ -697,6 +698,7 @@ def nexus_delivery_summary(body: NexusDeliverySummaryIn, request: Request):
     return store.nexus_delivery_summary(
         body.candidate_ids, waiting_resume_ids=waiting_resume_ids,
         waiting_classification_ids=waiting_classification_ids,
+        enabled=nexus_enabled,
     )
 
 

@@ -2670,8 +2670,9 @@ def list_nexus_deliveries(candidate_id=None):
         return [dict(row) for row in rows]
 
 
-def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_classification_ids=()):
+def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_classification_ids=(), enabled=None):
     """Return the latest durable Nexus outcome for each requested candidate."""
+    nexus_enabled = bool(config.NEXUS_SYNC_ENABLED) if enabled is None else bool(enabled)
     ordered_ids = list(dict.fromkeys(int(value) for value in candidate_ids or []))
     waiting_resume_ids = {int(value) for value in waiting_resume_ids or []}
     waiting_classification_ids = {int(value) for value in waiting_classification_ids or []}
@@ -2679,7 +2680,7 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
         return {
             "selected": 0, "uploaded": 0, "pending": 0,
             "already_in_nexus": 0, "waiting_for_resume": 0, "waiting_for_classification": 0,
-            "not_uploaded": 0, "items": [],
+            "not_uploaded": 0, "enabled": nexus_enabled, "items": [],
         }
     placeholders = ",".join("?" for _ in ordered_ids)
     with _conn() as connection:
@@ -2739,7 +2740,7 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
                 reason = status or "failed"
             elif candidate_id not in candidates:
                 reason = "candidate_not_found"
-            elif not getattr(config, "NEXUS_SYNC_ENABLED", False):
+            elif not nexus_enabled:
                 reason = "nexus_disabled"
             elif not resumes.get(candidate_id):
                 reason = "resume_not_saved"
@@ -2759,7 +2760,7 @@ def nexus_delivery_summary(candidate_ids, *, waiting_resume_ids=(), waiting_clas
         "waiting_for_resume": sum(item["group"] == "waiting_for_resume" for item in items),
         "waiting_for_classification": sum(item["group"] == "waiting_for_classification" for item in items),
         "not_uploaded": sum(item["group"] == "not_uploaded" for item in items),
-        "enabled": bool(getattr(config, "NEXUS_SYNC_ENABLED", False)),
+        "enabled": nexus_enabled,
         "items": items,
     }
 
